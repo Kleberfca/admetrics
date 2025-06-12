@@ -1,0 +1,526 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User and Authentication Models
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  avatar        String?
+  password      String?
+  provider      String?   // 'local', 'google', 'facebook'
+  providerId    String?
+  emailVerified Boolean   @default(false)
+  isActive      Boolean   @default(true)
+  role          UserRole  @default(USER)
+  timezone      String    @default("UTC")
+  language      String    @default("en")
+  
+  // Preferences
+  preferences   Json?     // Dashboard preferences, notification settings, etc.
+  
+  // Relationships
+  organizations OrganizationMember[]
+  integrations  Integration[]
+  campaigns     Campaign[]
+  reports       Report[]
+  dashboards    Dashboard[]
+  alerts        Alert[]
+  sessions      UserSession[]
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastLoginAt   DateTime?
+
+  @@map("users")
+}
+
+model UserSession {
+  id          String   @id @default(cuid())
+  userId      String
+  token       String   @unique
+  userAgent   String?
+  ipAddress   String?
+  isValid     Boolean  @default(true)
+  expiresAt   DateTime
+  
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("user_sessions")
+}
+
+model Organization {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  domain      String?
+  logo        String?
+  settings    Json?    // Organization-wide settings
+  
+  members     OrganizationMember[]
+  integrations Integration[]
+  campaigns   Campaign[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id             String           @id @default(cuid())
+  userId         String
+  organizationId String
+  role           OrganizationRole @default(MEMBER)
+  permissions    Json?            // Custom permissions
+  
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([userId, organizationId])
+  @@map("organization_members")
+}
+
+// Platform Integration Models
+model Integration {
+  id               String            @id @default(cuid())
+  userId           String
+  organizationId   String?
+  platform         Platform
+  name             String            // User-defined name for this integration
+  status           IntegrationStatus @default(PENDING)
+  
+  // Encrypted credentials
+  credentials      Json              // Encrypted API keys, tokens, etc.
+  
+  // Configuration
+  config           Json?             // Platform-specific configuration
+  scopes           String[]          // API scopes/permissions
+  
+  // Sync settings
+  syncEnabled      Boolean           @default(true)
+  syncFrequency    SyncFrequency     @default(HOURLY)
+  lastSyncAt       DateTime?
+  nextSyncAt       DateTime?
+  
+  // Error handling
+  errorCount       Int               @default(0)
+  lastError        String?
+  lastErrorAt      DateTime?
+  
+  // Relationships
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization     Organization?     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  campaigns        Campaign[]
+  metrics          Metric[]
+  syncLogs         SyncLog[]
+  
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@unique([userId, platform, name])
+  @@map("integrations")
+}
+
+model SyncLog {
+  id            String      @id @default(cuid())
+  integrationId String
+  status        SyncStatus
+  recordsCount  Int         @default(0)
+  errorMessage  String?
+  duration      Int?        // Duration in milliseconds
+  metadata      Json?       // Additional sync metadata
+  
+  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  
+  createdAt     DateTime    @default(now())
+
+  @@map("sync_logs")
+}
+
+// Campaign and Metrics Models
+model Campaign {
+  id             String       @id @default(cuid())
+  userId         String
+  integrationId  String
+  organizationId String?
+  
+  // Campaign details
+  externalId     String       // ID from the advertising platform
+  name           String
+  status         CampaignStatus
+  objective      String?      // Campaign objective (conversions, traffic, etc.)
+  platform       Platform
+  
+  // Budget and scheduling
+  budget         Decimal?     @db.Decimal(12, 2)
+  budgetType     BudgetType?  // DAILY, LIFETIME
+  startDate      DateTime?
+  endDate        DateTime?
+  
+  // Targeting
+  targeting      Json?        // Audience targeting criteria
+  geoTargeting   Json?        // Geographic targeting
+  
+  // Creative assets
+  creatives      Json?        // Ad creatives information
+  
+  // Relationships
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  integration    Integration  @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  metrics        Metric[]
+  insights       AIInsight[]
+  
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  
+  @@unique([integrationId, externalId])
+  @@map("campaigns")
+}
+
+model Metric {
+  id            String   @id @default(cuid())
+  campaignId    String
+  integrationId String
+  
+  // Metric metadata
+  date          DateTime @db.Date
+  platform      Platform
+  metricType    MetricType
+  
+  // Core metrics
+  impressions   BigInt?   @default(0)
+  clicks        BigInt?   @default(0)
+  spend         Decimal?  @db.Decimal(12, 2)
+  conversions   Int?      @default(0)
+  revenue       Decimal?  @db.Decimal(12, 2)
+  
+  // Calculated metrics
+  ctr           Decimal?  @db.Decimal(8, 6) // Click-through rate
+  cpc           Decimal?  @db.Decimal(8, 2) // Cost per click
+  cpm           Decimal?  @db.Decimal(8, 2) // Cost per mille
+  cpa           Decimal?  @db.Decimal(8, 2) // Cost per acquisition
+  roas          Decimal?  @db.Decimal(8, 4) // Return on ad spend
+  roi           Decimal?  @db.Decimal(8, 4) // Return on investment
+  
+  // Platform-specific metrics
+  platformData  Json?     // Additional platform-specific metrics
+  
+  // Quality metrics
+  qualityScore  Decimal?  @db.Decimal(4, 2)
+  relevanceScore Decimal? @db.Decimal(4, 2)
+  
+  // Relationships
+  campaign      Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@unique([campaignId, date, metricType])
+  @@index([date])
+  @@index([platform])
+  @@index([campaignId, date])
+  @@map("metrics")
+}
+
+// AI and Analytics Models
+model AIInsight {
+  id          String      @id @default(cuid())
+  campaignId  String
+  type        InsightType
+  category    InsightCategory
+  
+  // Insight content
+  title       String
+  description String
+  confidence  Decimal     @db.Decimal(4, 3) // 0.000 to 1.000
+  priority    Priority    @default(MEDIUM)
+  
+  // Recommendations
+  recommendations Json?    // Actionable recommendations
+  impact      Json?       // Expected impact data
+  
+  // Status
+  status      InsightStatus @default(ACTIVE)
+  appliedAt   DateTime?
+  dismissedAt DateTime?
+  
+  // Relationships
+  campaign    Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  
+  @@index([campaignId])
+  @@index([type])
+  @@index([priority])
+  @@map("ai_insights")
+}
+
+model MLModel {
+  id          String      @id @default(cuid())
+  name        String
+  version     String
+  type        ModelType
+  platform    Platform?   // Platform-specific model or null for general
+  
+  // Model metadata
+  description String?
+  algorithm   String      // Random Forest, Neural Network, etc.
+  features    String[]    // Input features used by the model
+  performance Json        // Model performance metrics
+  
+  // Model files and configuration
+  modelPath   String      // Path to the trained model file
+  config      Json        // Model configuration
+  
+  // Training information
+  trainedAt   DateTime
+  trainingData Json       // Training dataset metadata
+  
+  // Status
+  isActive    Boolean     @default(false)
+  isDeployed  Boolean     @default(false)
+  
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  
+  @@unique([name, version])
+  @@map("ml_models")
+}
+
+// Dashboard and Reporting Models
+model Dashboard {
+  id          String      @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  
+  // Layout and configuration
+  layout      Json        // Dashboard layout configuration
+  widgets     Json        // Widget configurations
+  filters     Json?       // Default filters
+  
+  // Sharing and permissions
+  isPublic    Boolean     @default(false)
+  shareToken  String?     @unique
+  
+  // Relationships
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  
+  @@map("dashboards")
+}
+
+model Report {
+  id          String      @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  type        ReportType
+  
+  // Report configuration
+  config      Json        // Report generation configuration
+  filters     Json?       // Applied filters
+  schedule    Json?       // Automated report schedule
+  
+  // Generation status
+  status      ReportStatus @default(DRAFT)
+  filePath    String?     // Path to generated report file
+  fileSize    BigInt?     // File size in bytes
+  
+  // Sharing
+  isPublic    Boolean     @default(false)
+  shareToken  String?     @unique
+  
+  // Relationships
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  
+  @@map("reports")
+}
+
+model Alert {
+  id          String      @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  
+  // Alert conditions
+  conditions  Json        // Alert trigger conditions
+  channels    AlertChannel[] // Notification channels
+  
+  // Status
+  isActive    Boolean     @default(true)
+  lastTriggered DateTime?
+  triggerCount Int        @default(0)
+  
+  // Relationships
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  
+  @@map("alerts")
+}
+
+// Enums
+enum UserRole {
+  ADMIN
+  USER
+  VIEWER
+}
+
+enum OrganizationRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum Platform {
+  GOOGLE_ADS
+  FACEBOOK_ADS
+  INSTAGRAM_ADS
+  TIKTOK_ADS
+  LINKEDIN_ADS
+  TWITTER_ADS
+  YOUTUBE_ADS
+  PINTEREST_ADS
+  SNAPCHAT_ADS
+  GOOGLE_ANALYTICS
+  MAILCHIMP
+  HUBSPOT
+  SENDGRID
+  ACTIVECAMPAIGN
+}
+
+enum IntegrationStatus {
+  PENDING
+  CONNECTED
+  ERROR
+  DISABLED
+}
+
+enum SyncFrequency {
+  REAL_TIME
+  EVERY_15_MIN
+  HOURLY
+  DAILY
+  WEEKLY
+}
+
+enum SyncStatus {
+  SUCCESS
+  ERROR
+  PARTIAL
+  SKIPPED
+}
+
+enum CampaignStatus {
+  ACTIVE
+  PAUSED
+  ENDED
+  DRAFT
+  PENDING_REVIEW
+  DISAPPROVED
+}
+
+enum BudgetType {
+  DAILY
+  LIFETIME
+  MONTHLY
+}
+
+enum MetricType {
+  DAILY
+  HOURLY
+  CAMPAIGN_LEVEL
+  AD_SET_LEVEL
+  AD_LEVEL
+}
+
+enum InsightType {
+  PERFORMANCE
+  OPTIMIZATION
+  ANOMALY
+  PREDICTION
+  RECOMMENDATION
+}
+
+enum InsightCategory {
+  BUDGET
+  TARGETING
+  CREATIVE
+  BIDDING
+  SCHEDULING
+  PLATFORM
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum InsightStatus {
+  ACTIVE
+  APPLIED
+  DISMISSED
+  EXPIRED
+}
+
+enum ModelType {
+  CLASSIFICATION
+  REGRESSION
+  CLUSTERING
+  TIME_SERIES
+  DEEP_LEARNING
+  REINFORCEMENT_LEARNING
+}
+
+enum ReportType {
+  PERFORMANCE
+  COMPARISON
+  TREND_ANALYSIS
+  EXECUTIVE_SUMMARY
+  CUSTOM
+}
+
+enum ReportStatus {
+  DRAFT
+  GENERATING
+  COMPLETED
+  ERROR
+  SCHEDULED
+}
+
+enum AlertChannel {
+  EMAIL
+  SMS
+  SLACK
+  WEBHOOK
+  IN_APP
+}

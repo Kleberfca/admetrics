@@ -1,0 +1,654 @@
+# .github/workflows/ci.yml - Continuous Integration
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.9'
+
+jobs:
+  # Code Quality and Linting
+  lint-and-format:
+    name: Lint and Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          cd backend && npm ci
+          cd ../frontend && npm ci
+
+      - name: Run ESLint (Backend)
+        run: cd backend && npm run lint
+
+      - name: Run ESLint (Frontend)
+        run: cd frontend && npm run lint
+
+      - name: Check Prettier formatting
+        run: |
+          cd backend && npm run format:check
+          cd ../frontend && npm run format:check
+
+      - name: TypeScript type check (Backend)
+        run: cd backend && npm run type-check
+
+      - name: TypeScript type check (Frontend)
+        run: cd frontend && npm run type-check
+
+  # Backend Tests
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: admetrics_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: cd backend && npm ci
+
+      - name: Generate Prisma client
+        run: cd backend && npx prisma generate
+
+      - name: Run database migrations
+        run: cd backend && npx prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/admetrics_test
+
+      - name: Run unit tests
+        run: cd backend && npm run test:unit
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/admetrics_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test-secret
+
+      - name: Run integration tests
+        run: cd backend && npm run test:integration
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/admetrics_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test-secret
+
+      - name: Upload test coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./backend/coverage/lcov.info
+          flags: backend
+
+  # Frontend Tests
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: cd frontend && npm ci
+
+      - name: Run unit tests
+        run: cd frontend && npm run test -- --coverage --watchAll=false
+        env:
+          CI: true
+
+      - name: Upload test coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./frontend/coverage/lcov.info
+          flags: frontend
+
+  # AI Engine Tests
+  ai-tests:
+    name: AI Engine Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: admetrics_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          cd ai-engine
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Python tests
+        run: |
+          cd ai-engine
+          python -m pytest tests/ -v --cov=src --cov-report=xml
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/admetrics_test
+          REDIS_URL: redis://localhost:6379
+
+      - name: Upload test coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./ai-engine/coverage.xml
+          flags: ai-engine
+
+  # E2E Tests
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Start services with Docker Compose
+        run: |
+          cp .env.example .env
+          docker-compose up -d --build
+          
+      - name: Wait for services to be ready
+        run: |
+          chmod +x scripts/wait-for-services.sh
+          ./scripts/wait-for-services.sh
+
+      - name: Install Playwright
+        run: |
+          cd frontend
+          npm ci
+          npx playwright install --with-deps
+
+      - name: Run E2E tests
+        run: cd frontend && npm run test:e2e
+
+      - name: Upload E2E test results
+        uses: actions/upload-artifact@v3
+        if: failure()
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+
+      - name: Stop services
+        if: always()
+        run: docker-compose down
+
+  # Security Audit
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Run npm audit (Backend)
+        run: cd backend && npm audit --audit-level=high
+
+      - name: Run npm audit (Frontend)
+        run: cd frontend && npm audit --audit-level=high
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install safety
+        run: pip install safety
+
+      - name: Run Python security audit
+        run: cd ai-engine && safety check -r requirements.txt
+
+  # Build and Push Docker Images
+  build-images:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: [lint-and-format, backend-tests, frontend-tests, ai-tests]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: admetrics/dashboard
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: admetrics/backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: admetrics/frontend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push AI engine image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./ai-engine
+          push: true
+          tags: admetrics/ai-engine:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+---
+
+# .github/workflows/deploy.yml - Deployment
+name: Deploy to Production
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.9'
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region us-west-2 --name admetrics-staging
+
+      - name: Deploy to staging
+        run: |
+          helm upgrade --install admetrics-staging ./helm/admetrics \
+            --namespace staging \
+            --set image.tag=${{ github.sha }} \
+            --set environment=staging \
+            --set ingress.host=staging.admetrics.ai
+
+      - name: Run smoke tests
+        run: |
+          chmod +x scripts/smoke-tests.sh
+          ./scripts/smoke-tests.sh https://staging.admetrics.ai
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region us-west-2 --name admetrics-production
+
+      - name: Deploy to production
+        run: |
+          helm upgrade --install admetrics-production ./helm/admetrics \
+            --namespace production \
+            --set image.tag=${{ github.sha }} \
+            --set environment=production \
+            --set ingress.host=dashboard.admetrics.ai \
+            --set replicaCount=3
+
+      - name: Run production smoke tests
+        run: |
+          chmod +x scripts/smoke-tests.sh
+          ./scripts/smoke-tests.sh https://dashboard.admetrics.ai
+
+      - name: Create GitHub release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+
+---
+
+# .github/workflows/dependency-update.yml - Dependency Updates
+name: Dependency Updates
+
+on:
+  schedule:
+    # Run weekly on Monday at 9 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+jobs:
+  update-dependencies:
+    name: Update Dependencies
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Update npm dependencies (Backend)
+        run: |
+          cd backend
+          npx npm-check-updates -u
+          npm install
+
+      - name: Update npm dependencies (Frontend)
+        run: |
+          cd frontend
+          npx npm-check-updates -u
+          npm install
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Update Python dependencies
+        run: |
+          cd ai-engine
+          pip install pip-tools
+          pip-compile --upgrade requirements.in
+
+      - name: Run tests
+        run: |
+          cd backend && npm test
+          cd ../frontend && npm test
+          cd ../ai-engine && python -m pytest
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: update dependencies'
+          title: 'chore: automatic dependency updates'
+          body: |
+            This PR contains automatic dependency updates.
+            
+            ## Changes
+            - Updated npm dependencies for backend and frontend
+            - Updated Python dependencies for AI engine
+            
+            ## Testing
+            - [x] All tests pass
+            - [x] Dependencies are compatible
+            
+            Please review the changes before merging.
+          branch: dependency-updates
+          delete-branch: true
+
+---
+
+# .github/workflows/security-scan.yml - Security Scanning
+name: Security Scan
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  codeql-analysis:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['javascript', 'python']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v2
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+
+  trivy-scan:
+    name: Trivy Container Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker images
+        run: |
+          docker build -t admetrics/backend:test ./backend
+          docker build -t admetrics/frontend:test ./frontend
+          docker build -t admetrics/ai-engine:test ./ai-engine
+
+      - name: Run Trivy vulnerability scanner (Backend)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'admetrics/backend:test'
+          format: 'sarif'
+          output: 'trivy-backend-results.sarif'
+
+      - name: Run Trivy vulnerability scanner (Frontend)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'admetrics/frontend:test'
+          format: 'sarif'
+          output: 'trivy-frontend-results.sarif'
+
+      - name: Run Trivy vulnerability scanner (AI Engine)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'admetrics/ai-engine:test'
+          format: 'sarif'
+          output: 'trivy-ai-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: '.'
+
+  snyk-security:
+    name: Snyk Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
+      - name: Snyk Auth
+        run: snyk auth ${{ secrets.SNYK_TOKEN }}
+
+      - name: Snyk test (Backend)
+        run: |
+          cd backend
+          npm install
+          snyk test --severity-threshold=high
+
+      - name: Snyk test (Frontend)
+        run: |
+          cd frontend
+          npm install
+          snyk test --severity-threshold=high
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Snyk test (AI Engine)
+        run: |
+          cd ai-engine
+          pip install -r requirements.txt
+          snyk test --file=requirements.txt --severity-threshold=high

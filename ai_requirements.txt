@@ -1,0 +1,195 @@
+# Web Framework
+Flask==2.3.3
+Flask-CORS==4.0.0
+Flask-RESTful==0.3.10
+Flask-JWT-Extended==4.5.2
+Flask-Migrate==4.0.5
+Flask-SQLAlchemy==3.0.5
+Werkzeug==2.3.7
+
+# API and HTTP
+requests==2.31.0
+urllib3==2.0.4
+httpx==0.24.1
+
+# Data Processing and Analysis
+pandas==2.0.3
+numpy==1.25.2
+scipy==1.11.2
+scikit-learn==1.3.0
+statsmodels==0.14.0
+
+# Machine Learning Libraries
+lightgbm==4.0.0
+xgboost==1.7.6
+catboost==1.2.2
+imbalanced-learn==0.11.0
+
+# Deep Learning
+tensorflow==2.13.0
+torch==2.0.1
+torchvision==0.15.2
+transformers==4.33.2
+
+# Time Series Analysis
+prophet==1.1.4
+pmdarima==2.0.3
+seasonal-decompose==0.1.1
+
+# Natural Language Processing
+spacy==3.6.1
+nltk==3.8.1
+textblob==0.17.1
+vaderSentiment==3.3.2
+
+# Feature Engineering
+feature-engine==1.6.1
+category-encoders==2.6.1
+
+# Model Optimization
+optuna==3.3.0
+hyperopt==0.2.7
+bayesian-optimization==1.4.3
+
+# Model Serving and Deployment
+mlflow==2.6.0
+joblib==1.3.2
+pickle5==0.0.12
+cloudpickle==2.2.1
+
+# Database
+psycopg2-binary==2.9.7
+SQLAlchemy==2.0.20
+alembic==1.12.0
+
+# Cache and Message Queue
+redis==4.6.0
+celery==5.3.1
+
+# Monitoring and Logging
+prometheus-client==0.17.1
+structlog==23.1.0
+python-json-logger==2.0.7
+
+# Data Validation
+pydantic==2.3.0
+marshmallow==3.20.1
+cerberus==1.3.5
+
+# Visualization (for development and debugging)
+matplotlib==3.7.2
+seaborn==0.12.2
+plotly==5.16.1
+
+# Configuration
+python-dotenv==1.0.0
+PyYAML==6.0.1
+configparser==6.0.0
+
+# Utilities
+click==8.1.7
+tqdm==4.66.1
+python-dateutil==2.8.2
+pytz==2023.3
+schedule==1.2.0
+
+# Testing
+pytest==7.4.2
+pytest-cov==4.1.0
+pytest-mock==3.11.1
+factory-boy==3.3.0
+
+# Code Quality
+black==23.7.0
+flake8==6.0.0
+isort==5.12.0
+mypy==1.5.1
+
+# Security
+cryptography==41.0.4
+bcrypt==4.0.1
+
+# File Processing
+openpyxl==3.1.2
+xlsxwriter==3.1.2
+
+# API Documentation
+flasgger==0.9.7.1
+
+# Development
+ipython==8.14.0
+jupyter==1.0.0
+
+# Production
+gunicorn==21.2.0
+gevent==23.7.0
+
+# Specific AI/ML Models for Advertising
+google-ads-api==22.1.0
+facebook-business==17.0.2
+
+# Model Interpretability
+shap==0.42.1
+lime==0.2.0.1
+eli5==0.13.0
+
+# Anomaly Detection
+pyod==1.1.0
+isolation-forest==0.0.3
+
+# Clustering
+hdbscan==0.8.33
+scikit-learn-extra==0.3.0
+
+# Reinforcement Learning
+stable-baselines3==2.1.0
+gym==0.29.1
+
+# Time Series Forecasting
+sktime==0.22.0
+darts==0.25.0
+
+# AutoML
+auto-sklearn==0.15.0
+h2o==3.42.0.2
+
+# Model Monitoring
+evidently==0.4.1
+whylogs==1.3.3
+
+# Data Drift Detection
+alibi-detect==0.12.0
+
+# Hyperparameter Tuning
+ray[tune]==2.6.3
+
+# Graph Neural Networks (for advanced audience analysis)
+torch-geometric==2.3.1
+dgl==1.1.1
+
+# Causal Inference
+causalml==0.15.0
+dowhy==0.9.1
+
+# Privacy-Preserving ML
+opacus==1.4.0
+
+# Model Compression
+torch-pruning==1.2.4
+
+# Multi-objective Optimization
+pymoo==0.6.0.1
+
+# Ensemble Methods
+mlxtend==0.22.0
+
+# Active Learning
+modAL==0.4.1
+
+# Federated Learning
+flower==1.5.0
+
+# Version pinning for stability
+setuptools==68.1.2
+wheel==0.41.2
+pip==23.2.1
