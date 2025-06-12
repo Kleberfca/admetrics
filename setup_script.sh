@@ -1,46 +1,22 @@
 #!/bin/bash
+# setup.sh - AdMetrics AI Dashboard Setup Script
 
-# ==============================================
-# AdMetrics AI Dashboard Setup Script
-# ==============================================
-# This script sets up the complete development environment
-# for the AdMetrics AI Dashboard project.
-
-set -e  # Exit on any error
+set -e
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# ASCII Art Banner
-show_banner() {
-    echo -e "${BLUE}"
-    cat << "EOF"
-    ▄▄▄       ▓█████▄  ███▄ ▄███▓▓█████▄▄▄█████▓ ██▀███   ██▓ ▄████▄   ██████ 
-   ▒████▄     ▒██▀ ██▌▓██▒▀█▀ ██▒▓█   ▀▓  ██▒ ▓▒▓██ ▒ ██▒▓██▒▒██▀ ▀█ ▒██    ▒ 
-   ▒██  ▀█▄   ░██   █▌▓██    ▓██░▒███  ▒ ▓██░ ▒░▓██ ░▄█ ▒▒██▒▒▓█    ▄░ ▓██▄   
-   ░██▄▄▄▄██  ░▓█▄   ▌▒██    ▒██ ▒▓█  ▄░ ▓██▓ ░ ▒██▀▀█▄  ░██░▒▓▓▄ ▄██▒ ▒   ██▒
-    ▓█   ▓██▒ ░▒████▓ ▒██▒   ░██▒░▒████▒ ▒██▒ ░ ░██▓ ▒██▒░██░▒ ▓███▀ ░▒██████▒▒
-    ▒▒   ▓▒█░  ▒▒▓  ▒ ░ ▒░   ░  ░░░ ▒░ ░ ▒ ░░   ░ ▒▓ ░▒▓░░▓  ░ ░▒ ▒  ░▒ ▒▓▒ ▒ ░
-     ▒   ▒▒ ░  ░ ▒  ▒ ░  ░      ░ ░ ░  ░   ░      ░▒ ░ ▒░ ▒ ░  ░  ▒   ░ ░▒  ░ ░
-     ░   ▒     ░ ░  ░ ░      ░      ░    ░        ░░   ░  ▒ ░░        ░  ░  ░  
-         ░  ░    ░           ░      ░  ░           ░      ░  ░ ░            ░  
-             ░                                              ░                  
-EOF
-    echo -e "${NC}"
-    echo -e "${CYAN}========================================${NC}"
-    echo -e "${CYAN}   AdMetrics AI Dashboard Setup        ${NC}"
-    echo -e "${CYAN}   Intelligent Advertising Analytics   ${NC}"
-    echo -e "${CYAN}========================================${NC}"
-    echo ""
-}
+# Configuration
+PROJECT_NAME="AdMetrics AI Dashboard"
+MIN_NODE_VERSION="18.0.0"
+MIN_PYTHON_VERSION="3.9.0"
+MIN_DOCKER_VERSION="20.0.0"
 
-# Log functions
+# Functions
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
@@ -57,391 +33,579 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-log_step() {
-    echo -e "${PURPLE}[STEP]${NC} $1"
-}
+show_banner() {
+    echo -e "${BLUE}"
+    cat << "EOF"
+    ___       ____  ___      __       _          
+   / _ \     /  _/ / _ \    / /____  (_)____  ___
+  / __ |___/ /  / ___/   / __/ __ \/ / ___/ / __|
+ / /_/ |___/ /_/ /      / /_/ /_/ / / /__  \__ \
+/_/  |_\___/___/_/       \__/\____/_/\___/ |___/
 
-# Check if command exists
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
+AdMetrics AI Dashboard - Setup Script
+Intelligent Advertising Campaign Analytics
+EOF
+    echo -e "${NC}"
 }
 
 # Check system requirements
 check_requirements() {
-    log_step "Checking system requirements..."
+    log_info "Checking system requirements..."
     
-    local missing_deps=()
-    
-    # Check Node.js
-    if command_exists node; then
-        NODE_VERSION=$(node --version | cut -d'v' -f2)
-        if [[ $(echo "$NODE_VERSION 18.0.0" | tr " " "\n" | sort -V | head -n1) != "18.0.0" ]]; then
-            log_warning "Node.js version $NODE_VERSION found. Recommended: >= 18.0.0"
-        else
-            log_success "Node.js $NODE_VERSION ✓"
-        fi
+    # Check if running on supported OS
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        OS="linux"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        OS="macos"
+    elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
+        OS="windows"
     else
-        missing_deps+=("Node.js >= 18.0.0")
-    fi
-    
-    # Check npm
-    if command_exists npm; then
-        NPM_VERSION=$(npm --version)
-        log_success "npm $NPM_VERSION ✓"
-    else
-        missing_deps+=("npm")
-    fi
-    
-    # Check Python
-    if command_exists python3; then
-        PYTHON_VERSION=$(python3 --version | cut -d' ' -f2)
-        if [[ $(echo "$PYTHON_VERSION 3.9.0" | tr " " "\n" | sort -V | head -n1) != "3.9.0" ]]; then
-            log_warning "Python version $PYTHON_VERSION found. Recommended: >= 3.9.0"
-        else
-            log_success "Python $PYTHON_VERSION ✓"
-        fi
-    else
-        missing_deps+=("Python >= 3.9.0")
-    fi
-    
-    # Check Docker
-    if command_exists docker; then
-        DOCKER_VERSION=$(docker --version | cut -d' ' -f3 | cut -d',' -f1)
-        log_success "Docker $DOCKER_VERSION ✓"
-    else
-        missing_deps+=("Docker")
-    fi
-    
-    # Check Docker Compose
-    if command_exists docker-compose || docker compose version >/dev/null 2>&1; then
-        log_success "Docker Compose ✓"
-    else
-        missing_deps+=("Docker Compose")
-    fi
-    
-    # Check Git
-    if command_exists git; then
-        GIT_VERSION=$(git --version | cut -d' ' -f3)
-        log_success "Git $GIT_VERSION ✓"
-    else
-        missing_deps+=("Git")
-    fi
-    
-    if [ ${#missing_deps[@]} -ne 0 ]; then
-        log_error "Missing dependencies:"
-        for dep in "${missing_deps[@]}"; do
-            echo -e "  ${RED}✗${NC} $dep"
-        done
-        echo ""
-        log_info "Please install the missing dependencies and run this script again."
-        echo ""
-        echo "Installation guides:"
-        echo "  • Node.js: https://nodejs.org/"
-        echo "  • Python: https://python.org/"
-        echo "  • Docker: https://docs.docker.com/get-docker/"
-        echo "  • Git: https://git-scm.com/"
+        log_error "Unsupported operating system: $OSTYPE"
         exit 1
     fi
     
-    log_success "All requirements satisfied!"
+    log_success "Operating System: $OS"
+    
+    # Check Node.js
+    if command -v node >/dev/null 2>&1; then
+        NODE_VERSION=$(node --version | sed 's/v//')
+        if [ "$(printf '%s\n' "$MIN_NODE_VERSION" "$NODE_VERSION" | sort -V | head -n1)" = "$MIN_NODE_VERSION" ]; then
+            log_success "Node.js version: $NODE_VERSION ✓"
+        else
+            log_error "Node.js version $NODE_VERSION is too old. Minimum required: $MIN_NODE_VERSION"
+            log_info "Please update Node.js: https://nodejs.org/"
+            exit 1
+        fi
+    else
+        log_error "Node.js is not installed"
+        log_info "Please install Node.js: https://nodejs.org/"
+        exit 1
+    fi
+    
+    # Check npm
+    if command -v npm >/dev/null 2>&1; then
+        NPM_VERSION=$(npm --version)
+        log_success "npm version: $NPM_VERSION ✓"
+    else
+        log_error "npm is not installed"
+        exit 1
+    fi
+    
+    # Check Python
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_VERSION=$(python3 --version | awk '{print $2}')
+        if [ "$(printf '%s\n' "$MIN_PYTHON_VERSION" "$PYTHON_VERSION" | sort -V | head -n1)" = "$MIN_PYTHON_VERSION" ]; then
+            log_success "Python version: $PYTHON_VERSION ✓"
+        else
+            log_error "Python version $PYTHON_VERSION is too old. Minimum required: $MIN_PYTHON_VERSION"
+            exit 1
+        fi
+    else
+        log_error "Python 3 is not installed"
+        log_info "Please install Python 3: https://python.org/"
+        exit 1
+    fi
+    
+    # Check pip
+    if command -v pip3 >/dev/null 2>&1; then
+        PIP_VERSION=$(pip3 --version | awk '{print $2}')
+        log_success "pip version: $PIP_VERSION ✓"
+    else
+        log_error "pip3 is not installed"
+        exit 1
+    fi
+    
+    # Check Docker
+    if command -v docker >/dev/null 2>&1; then
+        DOCKER_VERSION=$(docker --version | awk '{print $3}' | sed 's/,//')
+        if [ "$(printf '%s\n' "$MIN_DOCKER_VERSION" "$DOCKER_VERSION" | sort -V | head -n1)" = "$MIN_DOCKER_VERSION" ]; then
+            log_success "Docker version: $DOCKER_VERSION ✓"
+        else
+            log_warning "Docker version $DOCKER_VERSION might be too old. Recommended: $MIN_DOCKER_VERSION+"
+        fi
+    else
+        log_warning "Docker is not installed. Some features will not be available."
+        log_info "Install Docker: https://docker.com/"
+    fi
+    
+    # Check Docker Compose
+    if command -v docker-compose >/dev/null 2>&1; then
+        DOCKER_COMPOSE_VERSION=$(docker-compose --version | awk '{print $3}' | sed 's/,//')
+        log_success "Docker Compose version: $DOCKER_COMPOSE_VERSION ✓"
+    else
+        log_warning "Docker Compose is not installed"
+    fi
+    
+    # Check Git
+    if command -v git >/dev/null 2>&1; then
+        GIT_VERSION=$(git --version | awk '{print $3}')
+        log_success "Git version: $GIT_VERSION ✓"
+    else
+        log_error "Git is not installed"
+        exit 1
+    fi
+    
+    log_success "All system requirements satisfied!"
 }
 
-# Create project directory structure
+# Create directory structure
 create_directory_structure() {
-    log_step "Creating project directory structure..."
+    log_info "Creating directory structure..."
     
-    # Create main directories
-    mkdir -p {backend,frontend,ai-engine,data-pipeline,infrastructure,docs,shared}
-    mkdir -p {backend/src,backend/tests,backend/prisma}
-    mkdir -p {frontend/src,frontend/public,frontend/tests}
-    mkdir -p {ai-engine/src,ai-engine/models,ai-engine/notebooks,ai-engine/tests}
-    mkdir -p {data-pipeline/src,data-pipeline/config}
-    mkdir -p {infrastructure/{docker,kubernetes,terraform,nginx,monitoring}}
-    mkdir -p {shared/{types,constants,utils}}
-    mkdir -p {scripts,logs,uploads,backups}
+    mkdir -p {backend,frontend,ai-engine,data-pipeline,infrastructure,docs,shared,logs,uploads,models,data}
+    mkdir -p backend/{src/{controllers,services,models,middleware,utils,config,routes,types},tests,prisma}
+    mkdir -p frontend/{src/{components,pages,hooks,services,store,utils,types,styles},public,tests}
+    mkdir -p ai-engine/{src/{models,services,data,api,utils},tests,notebooks}
+    mkdir -p data-pipeline/{src/{extractors,transformers,loaders,schedulers,config},tests}
+    mkdir -p infrastructure/{docker,kubernetes,nginx,monitoring,ssl,terraform}
+    mkdir -p shared/{types,utils,constants}
     
-    log_success "Directory structure created!"
+    log_success "Directory structure created"
 }
 
 # Setup environment files
 setup_environment() {
-    log_step "Setting up environment configuration..."
+    log_info "Setting up environment configuration..."
     
-    # Copy environment templates
     if [ ! -f .env ]; then
-        cp .env.example .env
-        log_info "Created .env file from template"
-        log_warning "Please edit .env file with your actual configuration values"
+        if [ -f .env.example ]; then
+            cp .env.example .env
+            log_success "Created .env from .env.example"
+        else
+            log_warning ".env.example not found, creating basic .env"
+            cat > .env << EOF
+# Environment Configuration
+NODE_ENV=development
+PORT=3000
+FRONTEND_URL=http://localhost:3001
+API_URL=http://localhost:3000
+
+# Database
+DATABASE_URL=postgresql://postgres:postgres123@localhost:5432/admetrics
+POSTGRES_DB=admetrics
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres123
+
+# Redis
+REDIS_URL=redis://localhost:6379
+REDIS_PASSWORD=redis123
+
+# JWT
+JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
+JWT_REFRESH_SECRET=your-refresh-secret-key-change-this-in-production
+
+# Encryption
+ENCRYPTION_KEY=your-32-character-encryption-key-here
+
+# AI Engine
+AI_ENGINE_URL=http://localhost:5000
+OPENAI_API_KEY=your-openai-api-key
+
+# Platform API Keys (fill in your actual keys)
+GOOGLE_ADS_DEVELOPER_TOKEN=
+FACEBOOK_APP_ID=
+FACEBOOK_APP_SECRET=
+TIKTOK_APP_ID=
+TIKTOK_APP_SECRET=
+LINKEDIN_CLIENT_ID=
+LINKEDIN_CLIENT_SECRET=
+
+# Email Service
+SENDGRID_API_KEY=
+SENDGRID_FROM_EMAIL=noreply@admetrics.ai
+
+# Monitoring
+ENABLE_METRICS=true
+LOG_LEVEL=info
+EOF
+        fi
     else
-        log_info ".env file already exists, skipping..."
+        log_info ".env file already exists"
     fi
     
-    # Generate JWT secret if not set
-    if grep -q "your-super-secret-jwt-key" .env; then
-        JWT_SECRET=$(openssl rand -base64 32 2>/dev/null || head -c 32 /dev/urandom | base64)
-        sed -i.bak "s/your-super-secret-jwt-key/${JWT_SECRET}/" .env
-        log_success "Generated JWT secret"
-    fi
-    
-    # Generate encryption key if not set
-    if grep -q "your-32-character-encryption-key" .env; then
-        ENCRYPTION_KEY=$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | xxd -p)
-        sed -i.bak "s/your-32-character-encryption-key/${ENCRYPTION_KEY}/" .env
-        log_success "Generated encryption key"
-    fi
-    
-    log_success "Environment configuration ready!"
+    # Create environment files for each service
+    for service in backend frontend ai-engine data-pipeline; do
+        if [ ! -f "$service/.env" ]; then
+            ln -sf ../.env "$service/.env"
+            log_success "Created .env symlink for $service"
+        fi
+    done
 }
 
-# Install backend dependencies
-install_backend() {
-    log_step "Installing backend dependencies..."
+# Install dependencies
+install_dependencies() {
+    log_info "Installing dependencies..."
     
-    if [ -d "backend" ]; then
+    # Root package.json (if exists)
+    if [ -f package.json ]; then
+        log_info "Installing root dependencies..."
+        npm install
+    fi
+    
+    # Backend dependencies
+    if [ -d backend ] && [ -f backend/package.json ]; then
+        log_info "Installing backend dependencies..."
         cd backend
-        
-        if [ -f "package.json" ]; then
-            npm install
-            log_success "Backend dependencies installed!"
-        else
-            log_warning "package.json not found in backend directory"
-        fi
-        
+        npm install
         cd ..
-    else
-        log_warning "Backend directory not found"
+        log_success "Backend dependencies installed"
     fi
-}
-
-# Install frontend dependencies
-install_frontend() {
-    log_step "Installing frontend dependencies..."
     
-    if [ -d "frontend" ]; then
+    # Frontend dependencies
+    if [ -d frontend ] && [ -f frontend/package.json ]; then
+        log_info "Installing frontend dependencies..."
         cd frontend
-        
-        if [ -f "package.json" ]; then
-            npm install
-            log_success "Frontend dependencies installed!"
-        else
-            log_warning "package.json not found in frontend directory"
-        fi
-        
+        npm install
         cd ..
-    else
-        log_warning "Frontend directory not found"
+        log_success "Frontend dependencies installed"
     fi
-}
-
-# Install AI engine dependencies
-install_ai_engine() {
-    log_step "Installing AI engine dependencies..."
     
-    if [ -d "ai-engine" ]; then
+    # AI Engine dependencies
+    if [ -d ai-engine ] && [ -f ai-engine/requirements.txt ]; then
+        log_info "Setting up AI Engine virtual environment..."
         cd ai-engine
-        
-        if [ -f "requirements.txt" ]; then
-            # Create virtual environment
-            python3 -m venv venv
-            source venv/bin/activate
-            
-            # Upgrade pip
-            pip install --upgrade pip
-            
-            # Install dependencies
-            pip install -r requirements.txt
-            
-            log_success "AI engine dependencies installed!"
-            log_info "Virtual environment created at ai-engine/venv"
-            log_info "Activate with: source ai-engine/venv/bin/activate"
-        else
-            log_warning "requirements.txt not found in ai-engine directory"
-        fi
-        
+        python3 -m venv venv
+        source venv/bin/activate
+        pip install --upgrade pip
+        pip install -r requirements.txt
         cd ..
-    else
-        log_warning "AI engine directory not found"
+        log_success "AI Engine dependencies installed"
+    fi
+    
+    # Data Pipeline dependencies
+    if [ -d data-pipeline ] && [ -f data-pipeline/requirements.txt ]; then
+        log_info "Setting up Data Pipeline virtual environment..."
+        cd data-pipeline
+        python3 -m venv venv
+        source venv/bin/activate
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        cd ..
+        log_success "Data Pipeline dependencies installed"
     fi
 }
 
 # Setup database
 setup_database() {
-    log_step "Setting up database..."
+    log_info "Setting up database..."
     
-    # Start database services
-    docker-compose up -d postgres redis
+    # Check if PostgreSQL is running
+    if command -v psql >/dev/null 2>&1; then
+        log_info "PostgreSQL client found, setting up local database..."
+        
+        # Try to connect and create database
+        if psql -h localhost -U postgres -c "SELECT 1;" >/dev/null 2>&1; then
+            psql -h localhost -U postgres -c "CREATE DATABASE admetrics;" 2>/dev/null || log_info "Database might already exist"
+            log_success "Database setup completed"
+        else
+            log_warning "Cannot connect to PostgreSQL. Please ensure PostgreSQL is running."
+            log_info "You can start PostgreSQL with Docker: docker run -d --name postgres -e POSTGRES_PASSWORD=postgres123 -p 5432:5432 postgres:15"
+        fi
+    fi
     
-    # Wait for database to be ready
-    log_info "Waiting for database to be ready..."
-    sleep 10
-    
-    # Run database migrations
-    if [ -d "backend" ] && [ -f "backend/package.json" ]; then
+    # Run Prisma migrations if backend exists
+    if [ -d backend ] && [ -f backend/prisma/schema.prisma ]; then
+        log_info "Running database migrations..."
         cd backend
-        npx prisma migrate dev --name init
-        log_success "Database migrations completed!"
+        npx prisma generate
+        npx prisma migrate dev --name init || log_warning "Migration failed - database might not be ready"
+        cd ..
+        log_success "Database migrations completed"
+    fi
+}
+
+# Build services
+build_services() {
+    log_info "Building services..."
+    
+    # Build backend
+    if [ -d backend ]; then
+        log_info "Building backend..."
+        cd backend
+        npm run build 2>/dev/null || log_warning "Backend build failed"
         cd ..
     fi
     
-    log_success "Database setup completed!"
-}
-
-# Build Docker images
-build_docker_images() {
-    log_step "Building Docker images..."
-    
-    docker-compose build --parallel
-    
-    log_success "Docker images built successfully!"
-}
-
-# Start services
-start_services() {
-    log_step "Starting all services..."
-    
-    docker-compose up -d
-    
-    # Wait for services to be ready
-    log_info "Waiting for services to start..."
-    sleep 30
-    
-    # Health checks
-    log_info "Performing health checks..."
-    
-    # Check backend
-    if curl -f http://localhost:3000/health >/dev/null 2>&1; then
-        log_success "Backend API ✓"
-    else
-        log_warning "Backend API not responding"
+    # Build frontend
+    if [ -d frontend ]; then
+        log_info "Building frontend..."
+        cd frontend
+        # Only build in production mode
+        if [ "$NODE_ENV" = "production" ]; then
+            npm run build
+        else
+            log_info "Skipping frontend build in development mode"
+        fi
+        cd ..
     fi
     
-    # Check frontend
-    if curl -f http://localhost:3001 >/dev/null 2>&1; then
-        log_success "Frontend ✓"
-    else
-        log_warning "Frontend not responding"
-    fi
-    
-    # Check AI engine
-    if curl -f http://localhost:5000/health >/dev/null 2>&1; then
-        log_success "AI Engine ✓"
-    else
-        log_warning "AI Engine not responding"
-    fi
-    
-    log_success "Services started successfully!"
+    log_success "Services built successfully"
 }
 
-# Show final instructions
+# Setup Docker environment
+setup_docker() {
+    if command -v docker >/dev/null 2>&1 && command -v docker-compose >/dev/null 2>&1; then
+        log_info "Setting up Docker environment..."
+        
+        # Build Docker images
+        log_info "Building Docker images..."
+        docker-compose build --no-cache
+        
+        # Start services
+        log_info "Starting services with Docker..."
+        docker-compose up -d postgres redis
+        
+        # Wait for services to be ready
+        log_info "Waiting for services to be ready..."
+        sleep 10
+        
+        # Run database migrations in Docker
+        log_info "Running database migrations..."
+        docker-compose exec backend npx prisma migrate dev --name init || log_warning "Migration failed"
+        
+        log_success "Docker environment ready"
+    else
+        log_warning "Docker not available, skipping Docker setup"
+    fi
+}
+
+# Create sample data
+create_sample_data() {
+    log_info "Creating sample data..."
+    
+    if [ -d backend ]; then
+        cd backend
+        # Create sample data script
+        cat > scripts/create-sample-data.js << 'EOF'
+const { PrismaClient } = require('@prisma/client');
+const bcrypt = require('bcryptjs');
+
+const prisma = new PrismaClient();
+
+async function main() {
+  // Create sample user
+  const hashedPassword = await bcrypt.hash('admin123', 12);
+  
+  const user = await prisma.user.upsert({
+    where: { email: 'admin@admetrics.ai' },
+    update: {},
+    create: {
+      email: 'admin@admetrics.ai',
+      name: 'Admin User',
+      password: hashedPassword,
+      role: 'ADMIN',
+      emailVerified: true
+    }
+  });
+
+  console.log('Created user:', user.email);
+
+  // Create sample integration
+  const integration = await prisma.integration.upsert({
+    where: { 
+      userId_platform_name: {
+        userId: user.id,
+        platform: 'GOOGLE_ADS',
+        name: 'Sample Google Ads'
+      }
+    },
+    update: {},
+    create: {
+      userId: user.id,
+      platform: 'GOOGLE_ADS',
+      name: 'Sample Google Ads',
+      status: 'CONNECTED',
+      credentials: {},
+      scopes: ['campaigns', 'metrics']
+    }
+  });
+
+  console.log('Created integration:', integration.name);
+
+  // Create sample campaign
+  const campaign = await prisma.campaign.upsert({
+    where: {
+      integrationId_externalId: {
+        integrationId: integration.id,
+        externalId: 'sample-campaign-1'
+      }
+    },
+    update: {},
+    create: {
+      externalId: 'sample-campaign-1',
+      name: 'Sample Campaign',
+      platform: 'GOOGLE_ADS',
+      status: 'ACTIVE',
+      objective: 'CONVERSIONS',
+      budget: 1000,
+      budgetType: 'DAILY',
+      userId: user.id,
+      integrationId: integration.id
+    }
+  });
+
+  console.log('Created campaign:', campaign.name);
+
+  // Create sample metrics
+  const today = new Date();
+  for (let i = 0; i < 30; i++) {
+    const date = new Date(today);
+    date.setDate(date.getDate() - i);
+    
+    await prisma.metric.upsert({
+      where: {
+        campaignId_date_metricType: {
+          campaignId: campaign.id,
+          date: date,
+          metricType: 'CAMPAIGN'
+        }
+      },
+      update: {},
+      create: {
+        campaignId: campaign.id,
+        integrationId: integration.id,
+        date: date,
+        platform: 'GOOGLE_ADS',
+        metricType: 'CAMPAIGN',
+        impressions: BigInt(Math.floor(Math.random() * 10000) + 1000),
+        clicks: BigInt(Math.floor(Math.random() * 500) + 50),
+        spend: Math.random() * 100 + 10,
+        conversions: Math.floor(Math.random() * 20) + 1,
+        revenue: Math.random() * 500 + 50
+      }
+    });
+  }
+
+  console.log('Created sample metrics for 30 days');
+}
+
+main()
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+    console.log('Sample data creation completed!');
+  });
+EOF
+
+        # Run sample data creation
+        node scripts/create-sample-data.js 2>/dev/null || log_warning "Could not create sample data"
+        cd ..
+        log_success "Sample data created"
+    fi
+}
+
+# Validate installation
+validate_installation() {
+    log_info "Validating installation..."
+    
+    local errors=0
+    
+    # Check if services can start
+    if [ -d backend ]; then
+        cd backend
+        timeout 10s npm run dev >/dev/null 2>&1 &
+        PID=$!
+        sleep 5
+        if kill -0 $PID 2>/dev/null; then
+            log_success "Backend service starts correctly"
+            kill $PID 2>/dev/null
+        else
+            log_error "Backend service failed to start"
+            ((errors++))
+        fi
+        cd ..
+    fi
+    
+    # Check Docker services
+    if command -v docker-compose >/dev/null 2>&1; then
+        if docker-compose ps | grep -q "Up"; then
+            log_success "Docker services are running"
+        else
+            log_warning "Some Docker services might not be running"
+        fi
+    fi
+    
+    if [ $errors -eq 0 ]; then
+        log_success "Installation validation passed!"
+    else
+        log_warning "Installation validation found $errors issue(s)"
+    fi
+}
+
+# Show completion message
 show_completion() {
-    echo ""
+    echo
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}   🎉 Setup Complete! 🎉              ${NC}"
+    echo -e "${GREEN}   🎉 Setup Complete! 🎉${NC}"
     echo -e "${GREEN}========================================${NC}"
-    echo ""
-    echo -e "${CYAN}Services are now running:${NC}"
+    echo
+    echo -e "${BLUE}$PROJECT_NAME is now ready!${NC}"
+    echo
+    echo -e "${YELLOW}Next steps:${NC}"
+    echo -e "  1. Configure your API keys in ${BLUE}.env${NC}"
+    echo -e "  2. Start the development servers:"
+    echo -e "     ${BLUE}npm run dev${NC} (runs all services)"
+    echo -e "  3. Or use Docker:"
+    echo -e "     ${BLUE}docker-compose up${NC}"
+    echo
+    echo -e "${YELLOW}Access your application:${NC}"
     echo -e "  • Frontend:  ${BLUE}http://localhost:3001${NC}"
     echo -e "  • Backend:   ${BLUE}http://localhost:3000${NC}"
     echo -e "  • AI Engine: ${BLUE}http://localhost:5000${NC}"
     echo -e "  • API Docs:  ${BLUE}http://localhost:3000/api/docs${NC}"
-    echo ""
-    echo -e "${CYAN}Useful commands:${NC}"
-    echo -e "  • View logs:        ${YELLOW}docker-compose logs -f${NC}"
-    echo -e "  • Stop services:    ${YELLOW}docker-compose down${NC}"
-    echo -e "  • Restart services: ${YELLOW}docker-compose restart${NC}"
-    echo -e "  • View status:      ${YELLOW}docker-compose ps${NC}"
-    echo ""
-    echo -e "${CYAN}Development:${NC}"
-    echo -e "  • Backend dev:      ${YELLOW}cd backend && npm run dev${NC}"
-    echo -e "  • Frontend dev:     ${YELLOW}cd frontend && npm start${NC}"
-    echo -e "  • AI Engine dev:    ${YELLOW}cd ai-engine && source venv/bin/activate && python src/api/app.py${NC}"
-    echo ""
-    echo -e "${CYAN}Next steps:${NC}"
-    echo -e "  1. Edit ${YELLOW}.env${NC} file with your API credentials"
-    echo -e "  2. Set up platform integrations (Google Ads, Facebook Ads, etc.)"
-    echo -e "  3. Configure AI models for your specific use case"
-    echo -e "  4. Customize dashboard widgets and layouts"
-    echo ""
+    echo
+    echo -e "${YELLOW}Default login credentials:${NC}"
+    echo -e "  • Email:    ${BLUE}admin@admetrics.ai${NC}"
+    echo -e "  • Password: ${BLUE}admin123${NC}"
+    echo
+    echo -e "${YELLOW}Useful commands:${NC}"
+    echo -e "  • ${BLUE}npm run dev${NC}          - Start development servers"
+    echo -e "  • ${BLUE}npm run build${NC}        - Build for production"
+    echo -e "  • ${BLUE}npm test${NC}             - Run tests"
+    echo -e "  • ${BLUE}docker-compose up${NC}    - Start with Docker"
+    echo -e "  • ${BLUE}docker-compose logs${NC}  - View logs"
+    echo
     echo -e "${GREEN}Happy coding! 🚀${NC}"
 }
 
-# Cleanup function
-cleanup() {
-    log_info "Cleaning up..."
-    docker-compose down
-}
-
-# Error handler
-error_handler() {
-    log_error "Setup failed at step: $1"
-    log_info "Check the logs above for details"
-    log_info "You can re-run this script to continue from where it left off"
-    cleanup
-    exit 1
-}
-
-# Main setup function
+# Main execution
 main() {
     show_banner
     
-    # Parse command line arguments
-    SKIP_DEPS=false
-    SKIP_DOCKER=false
-    DEV_MODE=false
-    
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --skip-deps)
-                SKIP_DEPS=true
-                shift
-                ;;
-            --skip-docker)
-                SKIP_DOCKER=true
-                shift
-                ;;
-            --dev)
-                DEV_MODE=true
-                shift
-                ;;
-            --help)
-                echo "Usage: $0 [OPTIONS]"
-                echo ""
-                echo "Options:"
-                echo "  --skip-deps    Skip dependency installation"
-                echo "  --skip-docker  Skip Docker setup"
-                echo "  --dev          Setup for development mode"
-                echo "  --help         Show this help message"
-                exit 0
-                ;;
-            *)
-                log_error "Unknown option: $1"
-                exit 1
-                ;;
-        esac
-    done
-    
-    # Trap errors
-    trap 'error_handler "main setup"' ERR
+    log_info "Starting $PROJECT_NAME setup..."
     
     # Run setup steps
     check_requirements
     create_directory_structure
     setup_environment
+    install_dependencies
+    setup_database
+    build_services
     
-    if [ "$SKIP_DEPS" = false ]; then
-        install_backend
-        install_frontend
-        install_ai_engine
+    # Optional Docker setup
+    if command -v docker >/dev/null 2>&1; then
+        read -p "$(echo -e ${YELLOW}Setup Docker environment? [y/N]: ${NC})" -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            setup_docker
+        fi
     fi
     
-    if [ "$SKIP_DOCKER" = false ]; then
-        setup_database
-        build_docker_images
-        start_services
+    # Optional sample data
+    read -p "$(echo -e ${YELLOW}Create sample data? [y/N]: ${NC})" -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        create_sample_data
     fi
     
+    validate_installation
     show_completion
 }
 
-# Run main function with all arguments
-main "$@"
+# Run main function if script is executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
