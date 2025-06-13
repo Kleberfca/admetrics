@@ -1,461 +1,718 @@
-import { Request, Response } from 'express';
-import { PrismaClient, Platform } from '@prisma/client';
-import { MetricsService } from '../services/metrics.service';
-import { AuthenticatedRequest } from '../middleware/auth';
-import { asyncHandler } from '../middleware/errorHandler';
-import { logger } from '../utils/logger';
-import { createNotFoundError, createValidationError } from '../middleware/errorHandler';
+import { Request, Response, NextFunction } from 'express';
+import { z } from 'zod';
+import { PrismaClient } from '@prisma/client';
+import Redis from 'ioredis';
 
-const prisma = new PrismaClient();
+import { MetricsService } from '../services/metrics.service';
+import { CampaignService } from '../services/campaigns.service';
+import { AIInsightsService } from '../services/ai-insights.service';
+import { logger } from '../utils/logger';
+import { validateDateRange, formatMetrics } from '../utils/data-normalizer';
+import { UnauthorizedError, NotFoundError } from '../middleware/error.middleware';
+
+// Validation schemas
+const dashboardOverviewSchema = z.object({
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+  platforms: z.string().optional(),
+  campaignIds: z.string().optional(),
+  timezone: z.string().optional().default('UTC'),
+  granularity: z.enum(['hour', 'day', 'week', 'month']).optional().default('day'),
+});
+
+const metricsQuerySchema = z.object({
+  startDate: z.string().datetime(),
+  endDate: z.string().datetime(),
+  platforms: z.string().optional(),
+  campaignIds: z.string().optional(),
+  metrics: z.string().optional(),
+  granularity: z.enum(['hour', 'day', 'week', 'month']).optional().default('day'),
+  timezone: z.string().optional().default('UTC'),
+  includeComparison: z.string().optional().transform(val => val === 'true'),
+});
+
+const customDashboardSchema = z.object({
+  name: z.string().min(1, 'Dashboard name is required'),
+  layout: z.array(z.object({
+    id: z.string(),
+    type: z.string(),
+    x: z.number(),
+    y: z.number(),
+    w: z.number(),
+    h: z.number(),
+    config: z.record(z.any()),
+  })),
+  isDefault: z.boolean().optional().default(false),
+  isPublic: z.boolean().optional().default(false),
+});
+
+interface AuthenticatedRequest extends Request {
+  user?: {
+    id: string;
+    email: string;
+    role: string;
+  };
+}
 
 export class DashboardController {
+  private prisma: PrismaClient;
+  private redis: Redis;
   private metricsService: MetricsService;
+  private campaignService: CampaignService;
+  private aiInsightsService: AIInsightsService;
 
-  constructor(metricsService: MetricsService) {
-    this.metricsService = metricsService;
+  constructor(prisma: PrismaClient, redis: Redis) {
+    this.prisma = prisma;
+    this.redis = redis;
+    this.metricsService = new MetricsService(prisma, redis);
+    this.campaignService = new CampaignService(prisma, redis);
+    this.aiInsightsService = new AIInsightsService(prisma, redis);
   }
 
   /**
-   * Get dashboard overview with key metrics
+   * @swagger
+   * /api/dashboard/overview:
+   *   get:
+   *     summary: Get dashboard overview with key metrics
+   *     tags: [Dashboard]
+   *     security:
+   *       - bearerAuth: []
+   *     parameters:
+   *       - in: query
+   *         name: startDate
+   *         schema:
+   *           type: string
+   *           format: date-time
+   *         description: Start date for metrics
+   *       - in: query
+   *         name: endDate
+   *         schema:
+   *           type: string
+   *           format: date-time
+   *         description: End date for metrics
+   *       - in: query
+   *         name: platforms
+   *         schema:
+   *           type: string
+   *         description: Comma-separated list of platforms
+   *       - in: query
+   *         name: campaignIds
+   *         schema:
+   *           type: string
+   *         description: Comma-separated list of campaign IDs
+   *     responses:
+   *       200:
+   *         description: Dashboard overview data
+   *       401:
+   *         description: Unauthorized
+   *       500:
+   *         description: Internal server error
    */
-  getOverview = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-    const userId = req.user!.id;
-    const { 
-      startDate, 
-      endDate, 
-      platforms,
-      campaignIds 
-    } = req.query;
+  public getOverview = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        throw new UnauthorizedError('User not authenticated');
+      }
 
-    // Default to last 30 days if no date range provided
-    const dateRange = {
-      startDate: startDate ? new Date(startDate as string) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      endDate: endDate ? new Date(endDate as string) : new Date()
-    };
+      const validatedQuery = dashboardOverviewSchema.parse(req.query);
 
-    // Parse platforms filter
-    const selectedPlatforms: Platform[] = platforms 
-      ? (platforms as string).split(',') as Platform[]
-      : [];
+      // Set default date range (last 30 days) if not provided
+      const endDate = validatedQuery.endDate 
+        ? new Date(validatedQuery.endDate)
+        : new Date();
+      const startDate = validatedQuery.startDate
+        ? new Date(validatedQuery.startDate)
+        : new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-    // Parse campaign IDs filter
-    const selectedCampaignIds: string[] = campaignIds
-      ? (campaignIds as string).split(',')
-      : [];
+      // Validate date range
+      validateDateRange(startDate, endDate);
 
-    const query = {
-      dateRange,
-      platforms: selectedPlatforms.length > 0 ? selectedPlatforms : undefined,
-      campaignIds: selectedCampaignIds.length > 0 ? selectedCampaignIds : undefined,
-    };
+      // Parse platforms and campaign IDs
+      const platforms = validatedQuery.platforms 
+        ? validatedQuery.platforms.split(',').map(p => p.trim())
+        : undefined;
+      const campaignIds = validatedQuery.campaignIds
+        ? validatedQuery.campaignIds.split(',').map(id => id.trim())
+        : undefined;
 
-    // Get metrics summary
-    const metricsSummary = await this.metricsService.getMetricsSummary(userId, query);
+      // Check cache first
+      const cacheKey = `dashboard:overview:${userId}:${JSON.stringify({
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
+        platforms,
+        campaignIds,
+        granularity: validatedQuery.granularity,
+      })}`;
 
-    // Get active campaigns count
-    const activeCampaignsCount = await prisma.campaign.count({
+      const cachedData = await this.redis.get(cacheKey);
+      if (cachedData) {
+        logger.info('Dashboard overview served from cache', { userId });
+        res.status(200).json({
+          success: true,
+          data: JSON.parse(cachedData),
+          cached: true,
+        });
+        return;
+      }
+
+      // Fetch data concurrently
+      const [
+        summary,
+        campaigns,
+        topCampaigns,
+        platformMetrics,
+        alerts,
+        aiInsights,
+        performanceScore,
+      ] = await Promise.all([
+        this.metricsService.getSummaryMetrics(userId, {
+          startDate,
+          endDate,
+          platforms,
+          campaignIds,
+        }),
+        this.campaignService.getCampaignsSummary(userId, {
+          platforms,
+          campaignIds,
+        }),
+        this.campaignService.getTopPerformingCampaigns(userId, {
+          startDate,
+          endDate,
+          platforms,
+          limit: 5,
+        }),
+        this.metricsService.getPlatformComparison(userId, {
+          startDate,
+          endDate,
+          platforms,
+        }),
+        this.getRecentAlerts(userId, 10),
+        this.aiInsightsService.getLatestInsights(userId, 3),
+        this.calculatePerformanceScore(userId, { startDate, endDate, platforms }),
+      ]);
+
+      const overview = {
+        summary: {
+          current: summary.current,
+          previous: summary.previous,
+          change: summary.change,
+          period: {
+            startDate: startDate.toISOString(),
+            endDate: endDate.toISOString(),
+            days: Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)),
+          },
+        },
+        campaigns: {
+          total: campaigns.total,
+          active: campaigns.active,
+          paused: campaigns.paused,
+          draft: campaigns.draft,
+        },
+        topCampaigns,
+        platforms: platformMetrics,
+        alerts: {
+          total: alerts.length,
+          unread: alerts.filter(alert => !alert.isRead).length,
+          recent: alerts.slice(0, 5),
+        },
+        aiInsights,
+        performance: {
+          score: performanceScore.score,
+          grade: performanceScore.grade,
+          factors: performanceScore.factors,
+          recommendations: performanceScore.recommendations,
+        },
+        lastUpdated: new Date().toISOString(),
+      };
+
+      // Cache for 5 minutes
+      await this.redis.setex(cacheKey, 300, JSON.stringify(overview));
+
+      logger.info('Dashboard overview generated', {
+        userId,
+        campaigns: campaigns.total,
+        platforms: platformMetrics.length,
+      });
+
+      res.status(200).json({
+        success: true,
+        data: overview,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const formattedErrors = error.errors.map(err => ({
+          field: err.path.join('.'),
+          message: err.message,
+        }));
+        
+        res.status(400).json({
+          success: false,
+          error: 'Validation failed',
+          details: formattedErrors,
+        });
+        return;
+      }
+      next(error);
+    }
+  };
+
+  /**
+   * @swagger
+   * /api/dashboard/metrics:
+   *   get:
+   *     summary: Get detailed metrics data for dashboard charts
+   *     tags: [Dashboard]
+   *     security:
+   *       - bearerAuth: []
+   *     parameters:
+   *       - in: query
+   *         name: startDate
+   *         required: true
+   *         schema:
+   *           type: string
+   *           format: date-time
+   *       - in: query
+   *         name: endDate
+   *         required: true
+   *         schema:
+   *           type: string
+   *           format: date-time
+   *       - in: query
+   *         name: platforms
+   *         schema:
+   *           type: string
+   *       - in: query
+   *         name: metrics
+   *         schema:
+   *           type: string
+   *       - in: query
+   *         name: granularity
+   *         schema:
+   *           type: string
+   *           enum: [hour, day, week, month]
+   *       - in: query
+   *         name: includeComparison
+   *         schema:
+   *           type: boolean
+   *     responses:
+   *       200:
+   *         description: Metrics data for charts
+   */
+  public getMetrics = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        throw new UnauthorizedError('User not authenticated');
+      }
+
+      const validatedQuery = metricsQuerySchema.parse(req.query);
+
+      const startDate = new Date(validatedQuery.startDate);
+      const endDate = new Date(validatedQuery.endDate);
+
+      validateDateRange(startDate, endDate);
+
+      const platforms = validatedQuery.platforms 
+        ? validatedQuery.platforms.split(',').map(p => p.trim())
+        : undefined;
+      const metrics = validatedQuery.metrics
+        ? validatedQuery.metrics.split(',').map(m => m.trim())
+        : ['spend', 'clicks', 'conversions', 'ctr', 'cpc', 'roas'];
+
+      // Get metrics data
+      const metricsData = await this.metricsService.getMetricsTimeSeries(userId, {
+        startDate,
+        endDate,
+        platforms,
+        metrics,
+        granularity: validatedQuery.granularity,
+        timezone: validatedQuery.timezone,
+      });
+
+      let comparisonData = null;
+      if (validatedQuery.includeComparison) {
+        const periodLength = endDate.getTime() - startDate.getTime();
+        const comparisonStartDate = new Date(startDate.getTime() - periodLength);
+        const comparisonEndDate = new Date(startDate.getTime());
+
+        comparisonData = await this.metricsService.getMetricsTimeSeries(userId, {
+          startDate: comparisonStartDate,
+          endDate: comparisonEndDate,
+          platforms,
+          metrics,
+          granularity: validatedQuery.granularity,
+          timezone: validatedQuery.timezone,
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        data: {
+          current: metricsData,
+          comparison: comparisonData,
+          metadata: {
+            startDate: startDate.toISOString(),
+            endDate: endDate.toISOString(),
+            granularity: validatedQuery.granularity,
+            platforms,
+            metrics,
+            includeComparison: validatedQuery.includeComparison,
+          },
+        },
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const formattedErrors = error.errors.map(err => ({
+          field: err.path.join('.'),
+          message: err.message,
+        }));
+        
+        res.status(400).json({
+          success: false,
+          error: 'Validation failed',
+          details: formattedErrors,
+        });
+        return;
+      }
+      next(error);
+    }
+  };
+
+  /**
+   * @swagger
+   * /api/dashboard/realtime:
+   *   get:
+   *     summary: Get real-time dashboard updates
+   *     tags: [Dashboard]
+   *     security:
+   *       - bearerAuth: []
+   *     responses:
+   *       200:
+   *         description: Real-time metrics
+   */
+  public getRealTimeUpdates = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        throw new UnauthorizedError('User not authenticated');
+      }
+
+      // Get real-time data from the last hour
+      const endDate = new Date();
+      const startDate = new Date(endDate.getTime() - 60 * 60 * 1000); // Last hour
+
+      const [currentMetrics, alerts, activeConnections] = await Promise.all([
+        this.metricsService.getRealTimeMetrics(userId, {
+          startDate,
+          endDate,
+        }),
+        this.getRecentAlerts(userId, 5),
+        this.getActiveIntegrations(userId),
+      ]);
+
+      res.status(200).json({
+        success: true,
+        data: {
+          metrics: currentMetrics,
+          alerts,
+          integrations: activeConnections,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * @swagger
+   * /api/dashboard/custom:
+   *   post:
+   *     summary: Create a custom dashboard layout
+   *     tags: [Dashboard]
+   *     security:
+   *       - bearerAuth: []
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             required:
+   *               - name
+   *               - layout
+   *             properties:
+   *               name:
+   *                 type: string
+   *               layout:
+   *                 type: array
+   *               isDefault:
+   *                 type: boolean
+   *               isPublic:
+   *                 type: boolean
+   *     responses:
+   *       201:
+   *         description: Custom dashboard created
+   */
+  public createCustomDashboard = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        throw new UnauthorizedError('User not authenticated');
+      }
+
+      const validatedData = customDashboardSchema.parse(req.body);
+
+      // If setting as default, remove default flag from other dashboards
+      if (validatedData.isDefault) {
+        await this.prisma.customDashboard.updateMany({
+          where: {
+            userId,
+            isDefault: true,
+          },
+          data: {
+            isDefault: false,
+          },
+        });
+      }
+
+      const dashboard = await this.prisma.customDashboard.create({
+        data: {
+          userId,
+          name: validatedData.name,
+          layout: validatedData.layout,
+          isDefault: validatedData.isDefault,
+          isPublic: validatedData.isPublic,
+        },
+      });
+
+      logger.info('Custom dashboard created', {
+        userId,
+        dashboardId: dashboard.id,
+        name: dashboard.name,
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Custom dashboard created successfully',
+        data: { dashboard },
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const formattedErrors = error.errors.map(err => ({
+          field: err.path.join('.'),
+          message: err.message,
+        }));
+        
+        res.status(400).json({
+          success: false,
+          error: 'Validation failed',
+          details: formattedErrors,
+        });
+        return;
+      }
+      next(error);
+    }
+  };
+
+  /**
+   * @swagger
+   * /api/dashboard/custom:
+   *   get:
+   *     summary: Get user's custom dashboards
+   *     tags: [Dashboard]
+   *     security:
+   *       - bearerAuth: []
+   *     responses:
+   *       200:
+   *         description: List of custom dashboards
+   */
+  public getCustomDashboards = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        throw new UnauthorizedError('User not authenticated');
+      }
+
+      const dashboards = await this.prisma.customDashboard.findMany({
+        where: {
+          OR: [
+            { userId },
+            { isPublic: true },
+          ],
+        },
+        orderBy: [
+          { isDefault: 'desc' },
+          { updatedAt: 'desc' },
+        ],
+        select: {
+          id: true,
+          name: true,
+          layout: true,
+          isDefault: true,
+          isPublic: true,
+          createdAt: true,
+          updatedAt: true,
+          user: {
+            select: {
+              firstName: true,
+              lastName: true,
+            },
+          },
+        },
+      });
+
+      res.status(200).json({
+        success: true,
+        data: { dashboards },
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * Private helper methods
+   */
+  private async getRecentAlerts(userId: string, limit: number = 10) {
+    return await this.prisma.alert.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        type: true,
+        title: true,
+        message: true,
+        severity: true,
+        isRead: true,
+        data: true,
+        createdAt: true,
+      },
+    });
+  }
+
+  private async getActiveIntegrations(userId: string) {
+    return await this.prisma.integration.findMany({
       where: {
         userId,
         status: 'ACTIVE',
-        ...(selectedPlatforms.length > 0 && { platform: { in: selectedPlatforms } }),
-        ...(selectedCampaignIds.length > 0 && { id: { in: selectedCampaignIds } }),
-      }
-    });
-
-    // Get integrations status
-    const integrations = await prisma.integration.findMany({
-      where: { userId },
+      },
       select: {
         id: true,
         platform: true,
         name: true,
         status: true,
         lastSyncAt: true,
-        errorCount: true,
-      }
-    });
-
-    const integrationsStatus = {
-      total: integrations.length,
-      active: integrations.filter(i => i.status === 'ACTIVE').length,
-      errors: integrations.filter(i => i.errorCount > 0).length,
-      lastSync: integrations.reduce((latest, integration) => {
-        return integration.lastSyncAt && (!latest || integration.lastSyncAt > latest)
-          ? integration.lastSyncAt
-          : latest;
-      }, null as Date | null),
-    };
-
-    // Get recent alerts
-    const recentAlerts = await prisma.alert.findMany({
-      where: { 
-        userId,
-        isActive: true,
-        lastTriggered: {
-          gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // Last 24 hours
-        }
-      },
-      orderBy: { lastTriggered: 'desc' },
-      take: 5,
-      select: {
-        id: true,
-        name: true,
-        lastTriggered: true,
-        conditions: true,
-      }
-    });
-
-    // Calculate performance scores (simplified)
-    const performanceScore = this.calculatePerformanceScore(metricsSummary);
-
-    const overview = {
-      summary: metricsSummary,
-      activeCampaigns: activeCampaignsCount,
-      integrations: integrationsStatus,
-      alerts: recentAlerts,
-      performance: {
-        score: performanceScore,
-        grade: this.getPerformanceGrade(performanceScore),
-      },
-      dateRange,
-      lastUpdated: new Date(),
-    };
-
-    res.json({
-      success: true,
-      data: overview,
-    });
-  });
-
-  /**
-   * Get performance chart data
-   */
-  getPerformanceChart = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-    const userId = req.user!.id;
-    const { 
-      startDate, 
-      endDate, 
-      metrics: requestedMetrics = 'spend,clicks,conversions',
-      groupBy = 'day',
-      platforms,
-      campaignIds 
-    } = req.query;
-
-    const dateRange = {
-      startDate: startDate ? new Date(startDate as string) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      endDate: endDate ? new Date(endDate as string) : new Date()
-    };
-
-    const metricTypes = (requestedMetrics as string).split(',');
-    const selectedPlatforms: Platform[] = platforms 
-      ? (platforms as string).split(',') as Platform[]
-      : [];
-    const selectedCampaignIds: string[] = campaignIds
-      ? (campaignIds as string).split(',')
-      : [];
-
-    const query = {
-      dateRange,
-      platforms: selectedPlatforms.length > 0 ? selectedPlatforms : undefined,
-      campaignIds: selectedCampaignIds.length > 0 ? selectedCampaignIds : undefined,
-      groupBy: groupBy as 'day' | 'week' | 'month',
-    };
-
-    const chartData = await this.metricsService.getMetrics(userId, query);
-
-    // Transform data for chart consumption
-    const transformedData = this.transformChartData(chartData, metricTypes);
-
-    res.json({
-      success: true,
-      data: {
-        chartData: transformedData,
-        metrics: metricTypes,
-        dateRange,
-        groupBy,
+        syncEnabled: true,
       },
     });
-  });
+  }
 
-  /**
-   * Get platform comparison data
-   */
-  getPlatformComparison = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-    const userId = req.user!.id;
-    const { 
-      startDate, 
-      endDate, 
-      metric = 'spend' 
-    } = req.query;
-
-    const dateRange = {
-      startDate: startDate ? new Date(startDate as string) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      endDate: endDate ? new Date(endDate as string) : new Date()
-    };
-
-    const query = {
-      dateRange,
-      groupBy: 'platform' as const,
-    };
-
-    const platformData = await this.metricsService.getMetrics(userId, query);
-    
-    // Calculate platform performance comparison
-    const comparison = this.calculatePlatformComparison(platformData, metric as string);
-
-    res.json({
-      success: true,
-      data: {
-        comparison,
-        metric,
-        dateRange,
-      },
-    });
-  });
-
-  /**
-   * Get top performing campaigns
-   */
-  getTopCampaigns = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-    const userId = req.user!.id;
-    const { 
-      startDate, 
-      endDate, 
-      metric = 'roas',
-      limit = '10',
-      platforms,
-    } = req.query;
-
-    const dateRange = {
-      startDate: startDate ? new Date(startDate as string) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      endDate: endDate ? new Date(endDate as string) : new Date()
-    };
-
-    const selectedPlatforms: Platform[] = platforms 
-      ? (platforms as string).split(',') as Platform[]
-      : [];
-
-    // Get campaign performance data
-    const campaigns = await prisma.campaign.findMany({
-      where: {
-        userId,
-        status: 'ACTIVE',
-        ...(selectedPlatforms.length > 0 && { platform: { in: selectedPlatforms } }),
-      },
-      include: {
-        metrics: {
-          where: {
-            date: {
-              gte: dateRange.startDate,
-              lte: dateRange.endDate,
-            }
-          }
-        }
-      }
-    });
-
-    // Calculate aggregated metrics for each campaign
-    const campaignPerformance = campaigns.map(campaign => {
-      const totalSpend = campaign.metrics.reduce((sum, m) => sum + (m.spend?.toNumber() || 0), 0);
-      const totalClicks = campaign.metrics.reduce((sum, m) => sum + (m.clicks || 0), 0);
-      const totalConversions = campaign.metrics.reduce((sum, m) => sum + (m.conversions || 0), 0);
-      const totalImpressions = campaign.metrics.reduce((sum, m) => sum + (m.impressions || 0), 0);
+  private async calculatePerformanceScore(
+    userId: string,
+    options: { startDate: Date; endDate: Date; platforms?: string[] }
+  ) {
+    try {
+      // This is a simplified performance scoring algorithm
+      // In production, this would be more sophisticated
+      const metrics = await this.metricsService.getSummaryMetrics(userId, options);
       
-      const roas = totalSpend > 0 ? (totalConversions * 100) / totalSpend : 0; // Simplified ROAS calculation
-      const ctr = totalImpressions > 0 ? (totalClicks / totalImpressions) * 100 : 0;
-      const cpc = totalClicks > 0 ? totalSpend / totalClicks : 0;
-
-      return {
-        id: campaign.id,
-        name: campaign.name,
-        platform: campaign.platform,
-        status: campaign.status,
-        spend: totalSpend,
-        clicks: totalClicks,
-        conversions: totalConversions,
-        impressions: totalImpressions,
-        roas,
-        ctr,
-        cpc,
-        metricValue: metric === 'roas' ? roas : 
-                    metric === 'spend' ? totalSpend :
-                    metric === 'clicks' ? totalClicks :
-                    metric === 'conversions' ? totalConversions :
-                    metric === 'ctr' ? ctr : roas,
-      };
-    });
-
-    // Sort by selected metric and take top N
-    const sortedCampaigns = campaignPerformance
-      .sort((a, b) => b.metricValue - a.metricValue)
-      .slice(0, parseInt(limit as string));
-
-    res.json({
-      success: true,
-      data: {
-        campaigns: sortedCampaigns,
-        metric,
-        dateRange,
-        total: campaigns.length,
-      },
-    });
-  });
-
-  /**
-   * Save custom dashboard layout
-   */
-  saveDashboardLayout = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-    const userId = req.user!.id;
-    const { name, layout, widgets, filters, isDefault = false } = req.body;
-
-    if (!name || !layout) {
-      throw createValidationError('Dashboard name and layout are required');
-    }
-
-    // Create or update dashboard
-    const dashboard = await prisma.dashboard.upsert({
-      where: {
-        userId_name: {
-          userId,
-          name,
-        }
-      },
-      update: {
-        layout,
-        widgets,
-        filters,
-        updatedAt: new Date(),
-      },
-      create: {
-        userId,
-        name,
-        layout,
-        widgets,
-        filters,
-        isPublic: false,
-      },
-    });
-
-    // If this is set as default, update user preferences
-    if (isDefault) {
-      await prisma.user.update({
-        where: { id: userId },
-        data: {
-          preferences: {
-            defaultDashboard: dashboard.id,
-          }
-        }
-      });
-    }
-
-    res.json({
-      success: true,
-      data: dashboard,
-      message: 'Dashboard layout saved successfully',
-    });
-  });
-
-  /**
-   * Get saved dashboard layouts
-   */
-  getDashboardLayouts = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-    const userId = req.user!.id;
-
-    const dashboards = await prisma.dashboard.findMany({
-      where: { userId },
-      orderBy: { updatedAt: 'desc' },
-      select: {
-        id: true,
-        name: true,
-        layout: true,
-        widgets: true,
-        filters: true,
-        isPublic: true,
-        createdAt: true,
-        updatedAt: true,
+      let score = 0;
+      const factors = [];
+      
+      // ROAS factor (0-40 points)
+      if (metrics.current.roas >= 4) {
+        score += 40;
+        factors.push({ name: 'ROAS', score: 40, status: 'excellent' });
+      } else if (metrics.current.roas >= 2) {
+        score += 25;
+        factors.push({ name: 'ROAS', score: 25, status: 'good' });
+      } else {
+        score += 10;
+        factors.push({ name: 'ROAS', score: 10, status: 'poor' });
       }
-    });
-
-    res.json({
-      success: true,
-      data: dashboards,
-    });
-  });
-
-  /**
-   * Private helper methods
-   */
-  private calculatePerformanceScore(summary: any): number {
-    // Simplified performance score calculation
-    // In a real implementation, this would be more sophisticated
-    
-    const roasScore = Math.min(summary.averageROAS * 10, 100); // Max 100 for ROAS >= 10
-    const ctrScore = Math.min(summary.averageCTR * 1000, 100); // Max 100 for CTR >= 10%
-    const conversionScore = summary.totalConversions > 0 ? 50 : 0; // Bonus for having conversions
-    
-    return Math.round((roasScore + ctrScore + conversionScore) / 3);
-  }
-
-  private getPerformanceGrade(score: number): string {
-    if (score >= 90) return 'A+';
-    if (score >= 80) return 'A';
-    if (score >= 70) return 'B+';
-    if (score >= 60) return 'B';
-    if (score >= 50) return 'C';
-    return 'D';
-  }
-
-  private transformChartData(data: any[], metricTypes: string[]): any[] {
-    // Transform the raw metrics data into chart-friendly format
-    return data.map(item => {
-      const transformed: any = {
-        date: item.key,
-        timestamp: new Date(item.key).getTime(),
-      };
-
-      metricTypes.forEach(metric => {
-        switch (metric) {
-          case 'spend':
-            transformed.spend = item.totalSpend || 0;
-            break;
-          case 'clicks':
-            transformed.clicks = item.totalClicks || 0;
-            break;
-          case 'conversions':
-            transformed.conversions = item.totalConversions || 0;
-            break;
-          case 'impressions':
-            transformed.impressions = item.totalImpressions || 0;
-            break;
-          case 'ctr':
-            transformed.ctr = item.averageCTR || 0;
-            break;
-          case 'cpc':
-            transformed.cpc = item.averageCPC || 0;
-            break;
-          case 'roas':
-            transformed.roas = item.averageROAS || 0;
-            break;
-        }
-      });
-
-      return transformed;
-    });
-  }
-
-  private calculatePlatformComparison(data: any[], metric: string): any[] {
-    return data.map(platform => ({
-      platform: platform.key,
-      value: platform[`total${metric.charAt(0).toUpperCase() + metric.slice(1)}`] || 
-             platform[`average${metric.charAt(0).toUpperCase() + metric.slice(1)}`] || 0,
-      percentage: 0, // Will be calculated after getting all values
-    })).map((item, _, array) => {
-      const total = array.reduce((sum, p) => sum + p.value, 0);
+      
+      // CTR factor (0-30 points)
+      if (metrics.current.ctr >= 3) {
+        score += 30;
+        factors.push({ name: 'CTR', score: 30, status: 'excellent' });
+      } else if (metrics.current.ctr >= 1.5) {
+        score += 20;
+        factors.push({ name: 'CTR', score: 20, status: 'good' });
+      } else {
+        score += 5;
+        factors.push({ name: 'CTR', score: 5, status: 'poor' });
+      }
+      
+      // Conversion Rate factor (0-30 points)
+      if (metrics.current.conversionRate >= 5) {
+        score += 30;
+        factors.push({ name: 'Conversion Rate', score: 30, status: 'excellent' });
+      } else if (metrics.current.conversionRate >= 2) {
+        score += 20;
+        factors.push({ name: 'Conversion Rate', score: 20, status: 'good' });
+      } else {
+        score += 5;
+        factors.push({ name: 'Conversion Rate', score: 5, status: 'poor' });
+      }
+      
+      // Determine grade
+      let grade: string;
+      if (score >= 85) grade = 'A';
+      else if (score >= 70) grade = 'B';
+      else if (score >= 55) grade = 'C';
+      else if (score >= 40) grade = 'D';
+      else grade = 'F';
+      
+      // Generate recommendations
+      const recommendations = [];
+      if (metrics.current.roas < 2) {
+        recommendations.push('Consider optimizing targeting to improve ROAS');
+      }
+      if (metrics.current.ctr < 1.5) {
+        recommendations.push('Test new ad creatives to improve click-through rates');
+      }
+      if (metrics.current.conversionRate < 2) {
+        recommendations.push('Review landing page experience and conversion funnel');
+      }
+      
       return {
-        ...item,
-        percentage: total > 0 ? (item.value / total) * 100 : 0,
+        score,
+        grade,
+        factors,
+        recommendations,
       };
-    });
+    } catch (error) {
+      logger.error('Error calculating performance score:', error);
+      return {
+        score: 0,
+        grade: 'N/A',
+        factors: [],
+        recommendations: [],
+      };
+    }
   }
 }
 

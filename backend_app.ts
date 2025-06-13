@@ -1,85 +1,76 @@
-import express, { Application, Request, Response } from 'express';
+import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
-import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
-import { createServer } from 'http';
-import { Server as SocketIOServer } from 'socket.io';
 import { PrismaClient } from '@prisma/client';
 import Redis from 'ioredis';
-import dotenv from 'dotenv';
-import path from 'path';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import swaggerUi from 'swagger-ui-express';
+import swaggerJsdoc from 'swagger-jsdoc';
 
 // Middleware
-import { errorHandler } from './middleware/errorHandler';
-import { authMiddleware } from './middleware/auth';
-import { requestLogger } from './middleware/requestLogger';
-import { validateRequest } from './middleware/validation';
+import { authMiddleware } from './middleware/auth.middleware';
+import { errorHandler } from './middleware/error.middleware';
+import { requestLogger } from './middleware/logger.middleware';
+import { rateLimitMiddleware } from './middleware/rate-limit.middleware';
 
 // Routes
 import authRoutes from './routes/auth.routes';
+import dashboardRoutes from './routes/dashboard.routes';
 import campaignsRoutes from './routes/campaigns.routes';
 import metricsRoutes from './routes/metrics.routes';
 import integrationsRoutes from './routes/integrations.routes';
 import reportsRoutes from './routes/reports.routes';
-import dashboardRoutes from './routes/dashboard.routes';
-import aiInsightsRoutes from './routes/aiInsights.routes';
-import usersRoutes from './routes/users.routes';
+import aiInsightsRoutes from './routes/ai-insights.routes';
 
 // Services
-import { MetricsService } from './services/metrics.service';
-import { DataPipelineService } from './services/dataPipeline.service';
 import { WebSocketService } from './services/websocket.service';
-import { NotificationService } from './services/notification.service';
-
-// Utils
 import { logger } from './utils/logger';
-import { gracefulShutdown } from './utils/gracefulShutdown';
 
-// Load environment variables
-dotenv.config();
+// Types
+import type { Application } from 'express';
 
 class AdMetricsApp {
   public app: Application;
   public server: any;
-  public io: SocketIOServer;
+  public io: Server;
   public prisma: PrismaClient;
   public redis: Redis;
-  
-  // Services
-  private metricsService: MetricsService;
-  private dataPipelineService: DataPipelineService;
-  private webSocketService: WebSocketService;
-  private notificationService: NotificationService;
+  public websocketService: WebSocketService;
 
   constructor() {
     this.app = express();
+    this.server = createServer(this.app);
     this.initializeDatabase();
     this.initializeRedis();
+    this.initializeWebSocket();
     this.initializeMiddleware();
     this.initializeRoutes();
-    this.initializeServices();
-    this.initializeWebSocket();
+    this.initializeSwagger();
     this.initializeErrorHandling();
   }
 
   private initializeDatabase(): void {
     this.prisma = new PrismaClient({
-      log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+      log: ['query', 'info', 'warn', 'error'],
       errorFormat: 'pretty',
     });
 
-    logger.info('Database connection initialized');
+    // Handle graceful shutdown
+    process.on('beforeExit', async () => {
+      await this.prisma.$disconnect();
+    });
   }
 
   private initializeRedis(): void {
-    const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-    
-    this.redis = new Redis(redisUrl, {
-      retryDelayOnFailover: 100,
+    this.redis = new Redis({
+      host: process.env.REDIS_HOST || 'localhost',
+      port: parseInt(process.env.REDIS_PORT || '6379'),
+      password: process.env.REDIS_PASSWORD,
+      retryDelayOnFailure: (times) => Math.min(times * 50, 2000),
       maxRetriesPerRequest: 3,
-      lazyConnect: true,
     });
 
     this.redis.on('connect', () => {
@@ -91,232 +82,250 @@ class AdMetricsApp {
     });
   }
 
+  private initializeWebSocket(): void {
+    this.io = new Server(this.server, {
+      cors: {
+        origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+        methods: ['GET', 'POST'],
+        credentials: true,
+      },
+      transports: ['websocket', 'polling'],
+    });
+
+    this.websocketService = new WebSocketService(this.io, this.prisma, this.redis);
+  }
+
   private initializeMiddleware(): void {
     // Security middleware
     this.app.use(helmet({
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
-          styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-          fontSrc: ["'self'", "https://fonts.gstatic.com"],
-          imgSrc: ["'self'", "data:", "https:"],
-          connectSrc: ["'self'", "wss:", "ws:"],
+          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+          fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+          imgSrc: ["'self'", 'data:', 'https:'],
+          scriptSrc: ["'self'"],
         },
       },
     }));
 
     // CORS configuration
     this.app.use(cors({
-      origin: process.env.NODE_ENV === 'production' 
-        ? [process.env.FRONTEND_URL || 'https://dashboard.admetrics.ai']
-        : ['http://localhost:3001', 'http://localhost:3000'],
+      origin: [
+        process.env.FRONTEND_URL || 'http://localhost:3000',
+        'http://localhost:3001', // Development
+      ],
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
     }));
 
-    // Rate limiting
-    const limiter = rateLimit({
+    // Compression and parsing
+    this.app.use(compression());
+    this.app.use(express.json({ limit: '10mb' }));
+    this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+    // Request logging
+    this.app.use(requestLogger);
+
+    // Global rate limiting
+    this.app.use(rateLimit({
       windowMs: 15 * 60 * 1000, // 15 minutes
-      max: process.env.NODE_ENV === 'production' ? 100 : 1000,
+      max: 1000, // Limit each IP to 1000 requests per windowMs
       message: 'Too many requests from this IP, please try again later.',
       standardHeaders: true,
       legacyHeaders: false,
-    });
-    this.app.use('/api/', limiter);
-
-    // Body parsing and compression
-    this.app.use(express.json({ limit: '10mb' }));
-    this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-    this.app.use(compression());
-
-    // Logging
-    if (process.env.NODE_ENV !== 'test') {
-      this.app.use(morgan('combined', { stream: { write: (message) => logger.info(message.trim()) } }));
-    }
-    this.app.use(requestLogger);
+    }));
 
     // Health check
-    this.app.get('/health', (req: Request, res: Response) => {
+    this.app.get('/health', (req, res) => {
       res.status(200).json({
-        status: 'OK',
+        status: 'healthy',
         timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
         environment: process.env.NODE_ENV,
         version: process.env.npm_package_version || '1.0.0',
-        services: {
-          database: 'connected',
-          redis: this.redis.status === 'ready' ? 'connected' : 'disconnected',
-        },
       });
     });
 
-    // API documentation
-    if (process.env.NODE_ENV !== 'production') {
-      const swaggerJSDoc = require('swagger-jsdoc');
-      const swaggerUi = require('swagger-ui-express');
+    // API status
+    this.app.get('/api/status', async (req, res) => {
+      try {
+        // Check database connection
+        await this.prisma.$queryRaw`SELECT 1`;
+        
+        // Check Redis connection
+        await this.redis.ping();
 
-      const swaggerDefinition = {
-        openapi: '3.0.0',
-        info: {
-          title: 'AdMetrics API',
-          version: '1.0.0',
-          description: 'AI-powered advertising analytics platform API',
-        },
-        servers: [
-          {
-            url: process.env.API_URL || 'http://localhost:3000',
-            description: 'Development server',
+        res.status(200).json({
+          status: 'operational',
+          services: {
+            database: 'connected',
+            redis: 'connected',
+            websocket: 'active',
           },
-        ],
-      };
-
-      const options = {
-        swaggerDefinition,
-        apis: ['./src/routes/*.ts'],
-      };
-
-      const swaggerSpec = swaggerJSDoc(options);
-      this.app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-    }
+          timestamp: new Date().toISOString(),
+        });
+      } catch (error) {
+        logger.error('Health check failed:', error);
+        res.status(503).json({
+          status: 'degraded',
+          error: 'Service health check failed',
+          timestamp: new Date().toISOString(),
+        });
+      }
+    });
   }
 
   private initializeRoutes(): void {
+    const apiRouter = express.Router();
+
     // API routes
-    this.app.use('/api/auth', authRoutes);
-    this.app.use('/api/users', authMiddleware, usersRoutes);
-    this.app.use('/api/campaigns', authMiddleware, campaignsRoutes);
-    this.app.use('/api/metrics', authMiddleware, metricsRoutes);
-    this.app.use('/api/integrations', authMiddleware, integrationsRoutes);
-    this.app.use('/api/reports', authMiddleware, reportsRoutes);
-    this.app.use('/api/dashboard', authMiddleware, dashboardRoutes);
-    this.app.use('/api/ai-insights', authMiddleware, aiInsightsRoutes);
+    apiRouter.use('/auth', authRoutes);
+    apiRouter.use('/dashboard', authMiddleware, dashboardRoutes);
+    apiRouter.use('/campaigns', authMiddleware, campaignsRoutes);
+    apiRouter.use('/metrics', authMiddleware, metricsRoutes);
+    apiRouter.use('/integrations', authMiddleware, integrationsRoutes);
+    apiRouter.use('/reports', authMiddleware, reportsRoutes);
+    apiRouter.use('/ai-insights', authMiddleware, aiInsightsRoutes);
 
-    // Serve static files in production
-    if (process.env.NODE_ENV === 'production') {
-      this.app.use(express.static(path.join(__dirname, '../../../frontend/build')));
-      
-      this.app.get('*', (req: Request, res: Response) => {
-        res.sendFile(path.join(__dirname, '../../../frontend/build/index.html'));
-      });
-    }
+    // Mount API router
+    this.app.use('/api', apiRouter);
 
-    // Catch 404 and forward to error handler
-    this.app.all('*', (req: Request, res: Response) => {
+    // Catch-all route for undefined endpoints
+    this.app.use('/api/*', (req, res) => {
       res.status(404).json({
         success: false,
-        message: `Route ${req.originalUrl} not found`,
-        error: 'NOT_FOUND',
+        error: 'Endpoint not found',
+        path: req.originalUrl,
       });
     });
   }
 
-  private initializeServices(): void {
-    this.metricsService = new MetricsService(this.prisma, this.redis);
-    this.dataPipelineService = new DataPipelineService(this.prisma, this.redis);
-    this.notificationService = new NotificationService(this.prisma, this.redis);
-    
-    // Start background services
-    this.dataPipelineService.startScheduledJobs();
-    logger.info('Background services initialized');
-  }
-
-  private initializeWebSocket(): void {
-    this.server = createServer(this.app);
-    this.io = new SocketIOServer(this.server, {
-      cors: {
-        origin: process.env.NODE_ENV === 'production' 
-          ? [process.env.FRONTEND_URL || 'https://dashboard.admetrics.ai']
-          : ['http://localhost:3001'],
-        methods: ['GET', 'POST'],
-        credentials: true,
+  private initializeSwagger(): void {
+    const swaggerOptions = {
+      definition: {
+        openapi: '3.0.0',
+        info: {
+          title: 'AdMetrics AI Dashboard API',
+          version: '1.0.0',
+          description: 'API documentation for AdMetrics AI Dashboard',
+          contact: {
+            name: 'AdMetrics Team',
+            email: 'dev@admetrics.ai',
+          },
+        },
+        servers: [
+          {
+            url: process.env.API_URL || 'http://localhost:3001',
+            description: 'Development server',
+          },
+        ],
+        components: {
+          securitySchemes: {
+            bearerAuth: {
+              type: 'http',
+              scheme: 'bearer',
+              bearerFormat: 'JWT',
+            },
+          },
+        },
+        security: [
+          {
+            bearerAuth: [],
+          },
+        ],
       },
-    });
+      apis: ['./src/routes/*.ts', './src/controllers/*.ts'],
+    };
 
-    this.webSocketService = new WebSocketService(this.io, this.metricsService);
-    this.webSocketService.initialize();
+    const swaggerSpec = swaggerJsdoc(swaggerOptions);
     
-    logger.info('WebSocket server initialized');
+    this.app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+      explorer: true,
+      customCss: '.swagger-ui .topbar { display: none }',
+      customSiteTitle: 'AdMetrics API Documentation',
+    }));
   }
 
   private initializeErrorHandling(): void {
+    // 404 handler
+    this.app.use('*', (req, res) => {
+      res.status(404).json({
+        success: false,
+        error: 'Resource not found',
+        path: req.originalUrl,
+      });
+    });
+
+    // Global error handler
     this.app.use(errorHandler);
 
-    // Graceful shutdown handlers
-    process.on('SIGTERM', () => {
-      logger.info('SIGTERM signal received: closing HTTP server');
-      this.gracefulShutdown();
-    });
-
-    process.on('SIGINT', () => {
-      logger.info('SIGINT signal received: closing HTTP server');
-      this.gracefulShutdown();
-    });
-
-    process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
+    // Unhandled promise rejections
+    process.on('unhandledRejection', (reason, promise) => {
       logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
-      this.gracefulShutdown();
     });
 
-    process.on('uncaughtException', (error: Error) => {
+    // Uncaught exceptions
+    process.on('uncaughtException', (error) => {
       logger.error('Uncaught Exception:', error);
-      this.gracefulShutdown();
-    });
-  }
-
-  private async gracefulShutdown(): Promise<void> {
-    try {
-      logger.info('Starting graceful shutdown...');
-
-      // Stop accepting new connections
-      if (this.server) {
-        this.server.close();
-      }
-
-      // Close WebSocket connections
-      if (this.io) {
-        this.io.close();
-      }
-
-      // Stop background services
-      if (this.dataPipelineService) {
-        await this.dataPipelineService.stopScheduledJobs();
-      }
-
-      // Close database connections
-      await this.prisma.$disconnect();
-      
-      // Close Redis connection
-      this.redis.disconnect();
-
-      logger.info('Graceful shutdown completed');
-      process.exit(0);
-    } catch (error) {
-      logger.error('Error during graceful shutdown:', error);
       process.exit(1);
-    }
+    });
   }
 
-  public listen(): void {
-    const port = process.env.PORT || 3000;
-    
+  public listen(port: number): void {
     this.server.listen(port, () => {
-      logger.info(`🚀 AdMetrics API server is running on port ${port}`);
-      logger.info(`📊 Environment: ${process.env.NODE_ENV}`);
-      logger.info(`🔗 API URL: http://localhost:${port}`);
-      
-      if (process.env.NODE_ENV !== 'production') {
-        logger.info(`📚 API Documentation: http://localhost:${port}/api/docs`);
-      }
+      logger.info(`🚀 AdMetrics Backend running on port ${port}`);
+      logger.info(`📚 API Documentation: http://localhost:${port}/api-docs`);
+      logger.info(`🔗 WebSocket server ready`);
+      logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+    });
+  }
+
+  public async gracefulShutdown(): Promise<void> {
+    logger.info('Starting graceful shutdown...');
+
+    return new Promise((resolve) => {
+      this.server.close(async () => {
+        logger.info('HTTP server closed');
+
+        // Close WebSocket connections
+        this.io.close();
+        logger.info('WebSocket server closed');
+
+        // Close database connection
+        await this.prisma.$disconnect();
+        logger.info('Database connection closed');
+
+        // Close Redis connection
+        this.redis.disconnect();
+        logger.info('Redis connection closed');
+
+        logger.info('Graceful shutdown completed');
+        resolve();
+      });
     });
   }
 }
 
-// Start the application
+// Initialize and start the application
 const app = new AdMetricsApp();
+const port = parseInt(process.env.PORT || '3001');
 
-// Only listen if this file is run directly (not imported)
-if (require.main === module) {
-  app.listen();
-}
+// Start server
+app.listen(port);
+
+// Graceful shutdown handlers
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received');
+  await app.gracefulShutdown();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  logger.info('SIGINT received');
+  await app.gracefulShutdown();
+  process.exit(0);
+});
 
 export default app;

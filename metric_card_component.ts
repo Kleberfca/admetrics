@@ -1,329 +1,312 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { motion } from 'framer-motion';
 import {
   ArrowTrendingUpIcon,
   ArrowTrendingDownIcon,
-  InformationCircleIcon,
+  MinusIcon,
 } from '@heroicons/react/24/outline';
-import { formatCurrency, formatNumber, formatPercentage } from '../../utils/formatters';
-import clsx from 'clsx';
+import { formatPercentage } from '../../utils/formatters';
 
 interface MetricCardProps {
   title: string;
-  value: number;
-  previousValue?: number;
-  format?: 'currency' | 'number' | 'percentage';
-  icon?: React.ReactNode;
+  value: string | number;
+  change?: number;
+  icon: React.ComponentType<{ className?: string }>;
+  trend?: 'up' | 'down' | 'neutral';
   loading?: boolean;
-  trend?: {
-    value: number;
-    label?: string;
-  };
-  comparison?: {
-    value: number;
-    label: string;
-    period: string;
-  };
-  description?: string;
-  color?: 'blue' | 'green' | 'yellow' | 'red' | 'purple' | 'indigo';
-  size?: 'sm' | 'md' | 'lg';
-  className?: string;
+  subtitle?: string;
   onClick?: () => void;
+  className?: string;
+  size?: 'sm' | 'md' | 'lg';
+  color?: 'blue' | 'green' | 'red' | 'yellow' | 'purple' | 'gray';
 }
 
 const MetricCard: React.FC<MetricCardProps> = ({
   title,
   value,
-  previousValue,
-  format = 'number',
-  icon,
+  change,
+  icon: Icon,
+  trend = 'neutral',
   loading = false,
-  trend,
-  comparison,
-  description,
-  color = 'blue',
-  size = 'md',
-  className,
+  subtitle,
   onClick,
+  className = '',
+  size = 'md',
+  color = 'blue',
 }) => {
-  // Calculate trend if previous value is provided and trend is not explicitly set
-  const calculatedTrend = useMemo(() => {
-    if (trend) return trend;
-    if (previousValue === undefined) return null;
-    
-    const change = value - previousValue;
-    const percentage = previousValue === 0 ? 
-      (value > 0 ? 100 : 0) : 
-      ((change / previousValue) * 100);
-    
-    return {
-      value: percentage,
-      label: `vs previous period`,
-    };
-  }, [trend, value, previousValue]);
+  const sizeClasses = {
+    sm: 'p-4',
+    md: 'p-6',
+    lg: 'p-8',
+  };
 
-  // Format the main value
-  const formattedValue = useMemo(() => {
-    if (loading) return '---';
+  const colorClasses = {
+    blue: 'text-blue-600 bg-blue-50',
+    green: 'text-green-600 bg-green-50',
+    red: 'text-red-600 bg-red-50',
+    yellow: 'text-yellow-600 bg-yellow-50',
+    purple: 'text-purple-600 bg-purple-50',
+    gray: 'text-gray-600 bg-gray-50',
+  };
+
+  const getTrendColor = (trend: string, change?: number) => {
+    if (change === undefined || change === 0) return 'text-gray-500';
     
-    switch (format) {
-      case 'currency':
-        return formatCurrency(value);
-      case 'percentage':
-        return formatPercentage(value);
-      case 'number':
+    switch (trend) {
+      case 'up':
+        return change > 0 ? 'text-green-600' : 'text-red-600';
+      case 'down':
+        return change < 0 ? 'text-green-600' : 'text-red-600';
       default:
-        return formatNumber(value);
+        return change > 0 ? 'text-green-600' : change < 0 ? 'text-red-600' : 'text-gray-500';
     }
-  }, [value, format, loading]);
-
-  // Determine trend direction and styling
-  const trendDirection = calculatedTrend ? 
-    (calculatedTrend.value > 0 ? 'up' : calculatedTrend.value < 0 ? 'down' : 'neutral') : 
-    'neutral';
-
-  // Color schemes
-  const colorSchemes = {
-    blue: {
-      bg: 'bg-blue-50 dark:bg-blue-900/20',
-      border: 'border-blue-200 dark:border-blue-800',
-      icon: 'text-blue-600 dark:text-blue-400',
-      accent: 'text-blue-600 dark:text-blue-400',
-    },
-    green: {
-      bg: 'bg-green-50 dark:bg-green-900/20',
-      border: 'border-green-200 dark:border-green-800',
-      icon: 'text-green-600 dark:text-green-400',
-      accent: 'text-green-600 dark:text-green-400',
-    },
-    yellow: {
-      bg: 'bg-yellow-50 dark:bg-yellow-900/20',
-      border: 'border-yellow-200 dark:border-yellow-800',
-      icon: 'text-yellow-600 dark:text-yellow-400',
-      accent: 'text-yellow-600 dark:text-yellow-400',
-    },
-    red: {
-      bg: 'bg-red-50 dark:bg-red-900/20',
-      border: 'border-red-200 dark:border-red-800',
-      icon: 'text-red-600 dark:text-red-400',
-      accent: 'text-red-600 dark:text-red-400',
-    },
-    purple: {
-      bg: 'bg-purple-50 dark:bg-purple-900/20',
-      border: 'border-purple-200 dark:border-purple-800',
-      icon: 'text-purple-600 dark:text-purple-400',
-      accent: 'text-purple-600 dark:text-purple-400',
-    },
-    indigo: {
-      bg: 'bg-indigo-50 dark:bg-indigo-900/20',
-      border: 'border-indigo-200 dark:border-indigo-800',
-      icon: 'text-indigo-600 dark:text-indigo-400',
-      accent: 'text-indigo-600 dark:text-indigo-400',
-    },
   };
 
-  const colorScheme = colorSchemes[color];
-
-  // Size variants
-  const sizeVariants = {
-    sm: {
-      container: 'p-4',
-      title: 'text-sm',
-      value: 'text-xl',
-      icon: 'h-5 w-5',
-    },
-    md: {
-      container: 'p-6',
-      title: 'text-sm',
-      value: 'text-2xl',
-      icon: 'h-6 w-6',
-    },
-    lg: {
-      container: 'p-8',
-      title: 'text-base',
-      value: 'text-3xl',
-      icon: 'h-8 w-8',
-    },
+  const getTrendIcon = (trend: string, change?: number) => {
+    if (change === undefined || change === 0) {
+      return <MinusIcon className="h-4 w-4" />;
+    }
+    
+    if (change > 0) {
+      return <ArrowTrendingUpIcon className="h-4 w-4" />;
+    } else if (change < 0) {
+      return <ArrowTrendingDownIcon className="h-4 w-4" />;
+    } else {
+      return <MinusIcon className="h-4 w-4" />;
+    }
   };
 
-  const sizeVariant = sizeVariants[size];
+  const cardContent = (
+    <div className={`bg-white rounded-lg shadow-sm border border-gray-200 ${sizeClasses[size]} ${className}`}>
+      <div className="flex items-center justify-between">
+        <div className="flex-1">
+          <div className="flex items-center">
+            <div className={`flex-shrink-0 p-3 rounded-lg ${colorClasses[color]}`}>
+              <Icon className="h-6 w-6" />
+            </div>
+            <div className="ml-4 flex-1">
+              <p className="text-sm font-medium text-gray-600 truncate">{title}</p>
+              {subtitle && (
+                <p className="text-xs text-gray-500 mt-1 truncate">{subtitle}</p>
+              )}
+            </div>
+          </div>
+          
+          <div className="mt-4">
+            {loading ? (
+              <div className="animate-pulse">
+                <div className="h-8 bg-gray-200 rounded w-24 mb-2"></div>
+                <div className="h-4 bg-gray-200 rounded w-16"></div>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-baseline">
+                  <p className="text-2xl font-bold text-gray-900 truncate">
+                    {value}
+                  </p>
+                </div>
+                
+                {change !== undefined && (
+                  <div className={`flex items-center mt-2 ${getTrendColor(trend, change)}`}>
+                    {getTrendIcon(trend, change)}
+                    <span className="ml-1 text-sm font-medium">
+                      {change > 0 ? '+' : ''}{formatPercentage(Math.abs(change))}
+                    </span>
+                    <span className="ml-1 text-xs text-gray-500">vs previous period</span>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  if (onClick) {
+    return (
+      <motion.button
+        onClick={onClick}
+        whileHover={{ scale: 1.02 }}
+        whileTap={{ scale: 0.98 }}
+        className="block w-full text-left focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 rounded-lg"
+      >
+        {cardContent}
+      </motion.button>
+    );
+  }
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
-      className={clsx(
-        'relative overflow-hidden rounded-lg border bg-white dark:bg-gray-800 shadow-sm transition-all duration-200',
-        colorScheme.border,
-        onClick && 'cursor-pointer hover:shadow-md',
-        sizeVariant.container,
-        className
-      )}
-      onClick={onClick}
     >
-      {loading && (
-        <div className="absolute inset-0 bg-white/50 dark:bg-gray-800/50 flex items-center justify-center">
-          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-gray-900 dark:border-white"></div>
-        </div>
-      )}
-
-      <div className="flex items-center">
-        <div className="flex-1">
-          <div className="flex items-center justify-between">
-            <p className={clsx(
-              'font-medium text-gray-600 dark:text-gray-300',
-              sizeVariant.title
-            )}>
-              {title}
-            </p>
-            
-            {description && (
-              <div className="group relative">
-                <InformationCircleIcon className="h-4 w-4 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" />
-                <div className="absolute right-0 top-6 hidden group-hover:block z-10">
-                  <div className="bg-gray-900 dark:bg-gray-700 text-white text-xs rounded py-1 px-2 whitespace-nowrap">
-                    {description}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="flex items-baseline space-x-2">
-            <p className={clsx(
-              'font-bold text-gray-900 dark:text-white',
-              sizeVariant.value
-            )}>
-              {formattedValue}
-            </p>
-
-            {calculatedTrend && (
-              <div className={clsx(
-                'flex items-center text-sm font-medium',
-                trendDirection === 'up' && 'text-green-600 dark:text-green-400',
-                trendDirection === 'down' && 'text-red-600 dark:text-red-400',
-                trendDirection === 'neutral' && 'text-gray-500 dark:text-gray-400'
-              )}>
-                {trendDirection === 'up' && (
-                  <ArrowTrendingUpIcon className="h-4 w-4 mr-1" />
-                )}
-                {trendDirection === 'down' && (
-                  <ArrowTrendingDownIcon className="h-4 w-4 mr-1" />
-                )}
-                
-                <span>
-                  {Math.abs(calculatedTrend.value).toFixed(1)}%
-                </span>
-              </div>
-            )}
-          </div>
-
-          {calculatedTrend?.label && (
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              {calculatedTrend.label}
-            </p>
-          )}
-
-          {comparison && (
-            <div className="mt-2 text-xs">
-              <span className="text-gray-500 dark:text-gray-400">
-                {comparison.label}: 
-              </span>
-              <span className="font-medium text-gray-700 dark:text-gray-300 ml-1">
-                {formatNumber(comparison.value)}
-              </span>
-              <span className="text-gray-500 dark:text-gray-400 ml-1">
-                ({comparison.period})
-              </span>
-            </div>
-          )}
-        </div>
-
-        {icon && (
-          <div className={clsx(
-            'flex-shrink-0 rounded-full p-3',
-            colorScheme.bg
-          )}>
-            <div className={clsx(colorScheme.icon, sizeVariant.icon)}>
-              {icon}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Decorative accent */}
-      <div className={clsx(
-        'absolute bottom-0 left-0 h-1 w-full opacity-50',
-        colorScheme.accent.replace('text-', 'bg-')
-      )} />
+      {cardContent}
     </motion.div>
   );
 };
 
-// Skeleton loader component
-export const MetricCardSkeleton: React.FC<{ size?: 'sm' | 'md' | 'lg' }> = ({ 
-  size = 'md' 
+// Grid component for organizing metric cards
+interface MetricCardsGridProps {
+  children: React.ReactNode;
+  columns?: 1 | 2 | 3 | 4 | 5 | 6;
+  gap?: 'sm' | 'md' | 'lg';
+  className?: string;
+}
+
+export const MetricCardsGrid: React.FC<MetricCardsGridProps> = ({
+  children,
+  columns = 4,
+  gap = 'md',
+  className = '',
 }) => {
-  const sizeVariants = {
-    sm: 'p-4',
-    md: 'p-6',
-    lg: 'p-8',
+  const columnClasses = {
+    1: 'grid-cols-1',
+    2: 'grid-cols-1 md:grid-cols-2',
+    3: 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3',
+    4: 'grid-cols-1 md:grid-cols-2 lg:grid-cols-4',
+    5: 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5',
+    6: 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6',
+  };
+
+  const gapClasses = {
+    sm: 'gap-4',
+    md: 'gap-6',
+    lg: 'gap-8',
   };
 
   return (
-    <div className={clsx(
-      'rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-sm',
-      sizeVariants[size]
-    )}>
-      <div className="animate-pulse">
-        <div className="flex items-center justify-between mb-2">
-          <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded w-20"></div>
-          <div className="h-4 w-4 bg-gray-200 dark:bg-gray-700 rounded-full"></div>
-        </div>
-        <div className="flex items-baseline space-x-2">
-          <div className="h-8 bg-gray-200 dark:bg-gray-700 rounded w-24"></div>
-          <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded w-12"></div>
-        </div>
-        <div className="h-3 bg-gray-200 dark:bg-gray-700 rounded w-16 mt-2"></div>
-      </div>
+    <div className={`grid ${columnClasses[columns]} ${gapClasses[gap]} ${className}`}>
+      {children}
     </div>
   );
 };
 
-// Grid container for multiple metric cards
-export const MetricCardsGrid: React.FC<{
-  children: React.ReactNode;
-  columns?: 1 | 2 | 3 | 4;
-  gap?: 'sm' | 'md' | 'lg';
-  className?: string;
-}> = ({ 
-  children, 
-  columns = 4, 
-  gap = 'md',
-  className 
-}) => {
-  const gridCols = {
-    1: 'grid-cols-1',
-    2: 'grid-cols-1 sm:grid-cols-2',
-    3: 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3',
-    4: 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4',
-  };
+// Skeleton loading component
+export const MetricCardSkeleton: React.FC<{ count?: number }> = ({ count = 4 }) => {
+  return (
+    <MetricCardsGrid columns={count as any}>
+      {Array.from({ length: count }).map((_, index) => (
+        <div
+          key={index}
+          className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 animate-pulse"
+        >
+          <div className="flex items-center">
+            <div className="flex-shrink-0 p-3 bg-gray-200 rounded-lg">
+              <div className="h-6 w-6 bg-gray-300 rounded"></div>
+            </div>
+            <div className="ml-4 flex-1">
+              <div className="h-4 bg-gray-200 rounded w-20 mb-2"></div>
+              <div className="h-3 bg-gray-200 rounded w-16"></div>
+            </div>
+          </div>
+          
+          <div className="mt-4">
+            <div className="h-8 bg-gray-200 rounded w-24 mb-2"></div>
+            <div className="h-4 bg-gray-200 rounded w-32"></div>
+          </div>
+        </div>
+      ))}
+    </MetricCardsGrid>
+  );
+};
 
-  const gapSizes = {
-    sm: 'gap-3',
-    md: 'gap-4',
-    lg: 'gap-6',
-  };
+// Compact metric card variant
+interface CompactMetricCardProps {
+  title: string;
+  value: string | number;
+  change?: number;
+  loading?: boolean;
+  className?: string;
+}
+
+export const CompactMetricCard: React.FC<CompactMetricCardProps> = ({
+  title,
+  value,
+  change,
+  loading = false,
+  className = '',
+}) => {
+  return (
+    <div className={`bg-white rounded-lg border border-gray-200 p-4 ${className}`}>
+      {loading ? (
+        <div className="animate-pulse">
+          <div className="h-3 bg-gray-200 rounded w-16 mb-2"></div>
+          <div className="h-6 bg-gray-200 rounded w-20 mb-1"></div>
+          <div className="h-3 bg-gray-200 rounded w-12"></div>
+        </div>
+      ) : (
+        <>
+          <p className="text-xs font-medium text-gray-600 truncate">{title}</p>
+          <p className="text-lg font-bold text-gray-900 mt-1 truncate">{value}</p>
+          {change !== undefined && (
+            <div className={`flex items-center mt-1 ${
+              change > 0 ? 'text-green-600' : change < 0 ? 'text-red-600' : 'text-gray-500'
+            }`}>
+              {change > 0 ? (
+                <ArrowTrendingUpIcon className="h-3 w-3" />
+              ) : change < 0 ? (
+                <ArrowTrendingDownIcon className="h-3 w-3" />
+              ) : (
+                <MinusIcon className="h-3 w-3" />
+              )}
+              <span className="ml-1 text-xs font-medium">
+                {change > 0 ? '+' : ''}{formatPercentage(Math.abs(change))}
+              </span>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
+// Metric card with sparkline
+interface SparklineMetricCardProps extends MetricCardProps {
+  sparklineData?: number[];
+  sparklineColor?: string;
+}
+
+export const SparklineMetricCard: React.FC<SparklineMetricCardProps> = ({
+  sparklineData = [],
+  sparklineColor = '#3B82F6',
+  ...props
+}) => {
+  const maxValue = Math.max(...sparklineData);
+  const minValue = Math.min(...sparklineData);
+  const range = maxValue - minValue;
+
+  const sparklinePoints = sparklineData.map((value, index) => {
+    const x = (index / (sparklineData.length - 1)) * 100;
+    const y = range > 0 ? ((maxValue - value) / range) * 100 : 50;
+    return `${x},${y}`;
+  }).join(' ');
 
   return (
-    <div className={clsx(
-      'grid',
-      gridCols[columns],
-      gapSizes[gap],
-      className
-    )}>
-      {children}
+    <div className="relative">
+      <MetricCard {...props} />
+      
+      {sparklineData.length > 1 && !props.loading && (
+        <div className="absolute bottom-2 right-2 w-16 h-8">
+          <svg
+            width="100%"
+            height="100%"
+            viewBox="0 0 100 100"
+            className="overflow-visible"
+          >
+            <polyline
+              points={sparklinePoints}
+              fill="none"
+              stroke={sparklineColor}
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity="0.7"
+            />
+          </svg>
+        </div>
+      )}
     </div>
   );
 };

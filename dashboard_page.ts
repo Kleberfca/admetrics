@@ -21,7 +21,7 @@ import {
 import toast from 'react-hot-toast';
 
 // Components
-import MetricCard, { MetricCardsGrid, MetricCardSkeleton } from '../../components/dashboard/MetricCard';
+import MetricCard from '../../components/dashboard/MetricCard';
 import PerformanceChart from '../../components/charts/PerformanceChart';
 import PlatformComparison from '../../components/charts/PlatformComparison';
 import CampaignTable from '../../components/campaigns/CampaignTable';
@@ -99,51 +99,26 @@ const Dashboard: React.FC = () => {
   } = useQuery({
     queryKey: ['dashboard-overview', queryParams],
     queryFn: () => apiService.getDashboardOverview(queryParams),
+    staleTime: 5 * 60 * 1000, // 5 minutes
     refetchInterval: refreshInterval,
-    staleTime: 30000, // 30 seconds
+    retry: 2,
   });
 
-  // Fetch performance chart data
+  // Fetch metrics data for charts
   const {
-    data: chartData,
-    isLoading: chartLoading,
-    error: chartError
+    data: metricsData,
+    isLoading: metricsLoading,
+    error: metricsError
   } = useQuery({
-    queryKey: ['performance-chart', queryParams, selectedMetrics],
-    queryFn: () => apiService.getPerformanceChart({
+    queryKey: ['dashboard-metrics', queryParams, selectedMetrics],
+    queryFn: () => apiService.getDashboardMetrics({
       ...queryParams,
       metrics: selectedMetrics.join(','),
-      groupBy: 'day'
+      includeComparison: true
     }),
-    enabled: selectedMetrics.length > 0,
-    staleTime: 60000, // 1 minute
-  });
-
-  // Fetch platform comparison
-  const {
-    data: platformData,
-    isLoading: platformLoading
-  } = useQuery({
-    queryKey: ['platform-comparison', queryParams],
-    queryFn: () => apiService.getPlatformComparison({
-      ...queryParams,
-      metric: 'spend'
-    }),
-    staleTime: 120000, // 2 minutes
-  });
-
-  // Fetch top campaigns
-  const {
-    data: topCampaigns,
-    isLoading: campaignsLoading
-  } = useQuery({
-    queryKey: ['top-campaigns', queryParams],
-    queryFn: () => apiService.getTopCampaigns({
-      ...queryParams,
-      metric: 'roas',
-      limit: 10
-    }),
-    staleTime: 120000, // 2 minutes
+    staleTime: 5 * 60 * 1000,
+    refetchInterval: refreshInterval,
+    enabled: !!overview, // Only fetch after overview is loaded
   });
 
   // Fetch AI insights
@@ -151,29 +126,29 @@ const Dashboard: React.FC = () => {
     data: aiInsights,
     isLoading: insightsLoading
   } = useQuery({
-    queryKey: ['ai-insights', queryParams],
-    queryFn: () => apiService.getAIInsights(queryParams),
+    queryKey: ['ai-insights', dateRange],
+    queryFn: () => apiService.getAIInsights({
+      startDate: dateRange.startDate.toISOString(),
+      endDate: dateRange.endDate.toISOString(),
+      platforms: selectedPlatforms.join(',')
+    }),
+    staleTime: 15 * 60 * 1000, // 15 minutes
     enabled: showInsights,
-    staleTime: 300000, // 5 minutes
   });
 
   // Handle date range change
-  const handleDateRangeChange = (newRange: DateRange) => {
-    setDateRange(newRange);
-    // Invalidate related queries
+  const handleDateRangeChange = (newDateRange: DateRange) => {
+    setDateRange(newDateRange);
+    // Invalidate queries to refetch with new date range
     queryClient.invalidateQueries({ queryKey: ['dashboard-overview'] });
-    queryClient.invalidateQueries({ queryKey: ['performance-chart'] });
-    queryClient.invalidateQueries({ queryKey: ['platform-comparison'] });
+    queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] });
   };
 
   // Handle platform filter change
   const handlePlatformChange = (platforms: Platform[]) => {
     setSelectedPlatforms(platforms);
-  };
-
-  // Handle metrics selection change
-  const handleMetricsChange = (metrics: string[]) => {
-    setSelectedMetrics(metrics);
+    queryClient.invalidateQueries({ queryKey: ['dashboard-overview'] });
+    queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] });
   };
 
   // Handle manual refresh
@@ -182,46 +157,70 @@ const Dashboard: React.FC = () => {
       await Promise.all([
         refetchOverview(),
         refreshRealTime(),
-        queryClient.invalidateQueries({ queryKey: ['performance-chart'] }),
-        queryClient.invalidateQueries({ queryKey: ['platform-comparison'] }),
-        queryClient.invalidateQueries({ queryKey: ['top-campaigns'] })
+        queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] })
       ]);
-      toast.success('Dashboard refreshed');
+      toast.success('Dashboard refreshed successfully');
     } catch (error) {
       toast.error('Failed to refresh dashboard');
     }
   };
 
   // Handle export
-  const handleExport = async () => {
+  const handleExport = async (format: 'pdf' | 'excel' | 'csv') => {
+    setIsExporting(true);
     try {
-      setIsExporting(true);
-      await apiService.exportData('/dashboard/export', queryParams, 'dashboard-report.csv');
+      const blob = await apiService.exportDashboard({
+        format,
+        ...queryParams,
+        includeCharts: format === 'pdf',
+        includeInsights: showInsights
+      });
+
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `dashboard-${dateRange.startDate.toISOString().split('T')[0]}-to-${dateRange.endDate.toISOString().split('T')[0]}.${format}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+
+      toast.success(`Dashboard exported as ${format.toUpperCase()}`);
     } catch (error) {
-      toast.error('Failed to export data');
+      toast.error('Failed to export dashboard');
     } finally {
       setIsExporting(false);
     }
   };
 
-  // Auto-refresh effect
-  useEffect(() => {
-    const interval = setInterval(handleRefresh, refreshInterval);
-    return () => clearInterval(interval);
-  }, [refreshInterval]);
-
-  // Error handling
-  if (overviewError) {
+  // Loading state
+  if (overviewLoading && !overview) {
     return (
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 p-6">
-        <ErrorAlert 
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <LoadingSpinner size="lg" />
+          <p className="mt-4 text-gray-600">Loading your dashboard...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Error state
+  if (overviewError && !overview) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <ErrorAlert
           title="Failed to load dashboard"
-          message="There was an error loading your dashboard data. Please try again."
+          message="There was an error loading your dashboard data. Please try refreshing the page."
           onRetry={handleRefresh}
         />
       </div>
     );
   }
+
+  // Merge real-time data with overview data
+  const currentMetrics = realTimeMetrics || overview?.summary?.current;
 
   return (
     <>
@@ -230,25 +229,19 @@ const Dashboard: React.FC = () => {
         <meta name="description" content="AI-powered advertising analytics dashboard" />
       </Helmet>
 
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
+      <div className="min-h-screen bg-gray-50">
         {/* Header */}
-        <div className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700">
+        <div className="bg-white shadow-sm border-b border-gray-200">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="flex items-center justify-between h-16">
               <div className="flex items-center space-x-4">
-                <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-                  Dashboard
-                </h1>
-                
-                {/* Real-time status indicator */}
-                <div className="flex items-center space-x-2">
-                  <div className={`w-2 h-2 rounded-full ${
-                    isRealTimeConnected ? 'bg-green-500' : 'bg-red-500'
-                  }`} />
-                  <span className="text-sm text-gray-500 dark:text-gray-400">
-                    {isRealTimeConnected ? 'Live' : 'Disconnected'}
-                  </span>
-                </div>
+                <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+                {isRealTimeConnected && (
+                  <div className="flex items-center space-x-2 text-sm text-green-600">
+                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                    <span>Live</span>
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center space-x-4">
@@ -257,6 +250,12 @@ const Dashboard: React.FC = () => {
                   startDate={dateRange.startDate}
                   endDate={dateRange.endDate}
                   onChange={handleDateRangeChange}
+                  maxDate={new Date()}
+                  presets={[
+                    { label: 'Last 7 days', value: 7 },
+                    { label: 'Last 30 days', value: 30 },
+                    { label: 'Last 90 days', value: 90 },
+                  ]}
                 />
 
                 {/* Platform Filter */}
@@ -265,34 +264,42 @@ const Dashboard: React.FC = () => {
                   onChange={handlePlatformChange}
                 />
 
-                {/* Action buttons */}
+                {/* Actions */}
                 <div className="flex items-center space-x-2">
                   <button
                     onClick={handleRefresh}
-                    className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
-                    title="Refresh"
+                    disabled={overviewLoading}
+                    className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-md transition-colors"
+                    title="Refresh dashboard"
                   >
-                    <ArrowPathIcon className="h-5 w-5" />
+                    <ArrowPathIcon className={`h-5 w-5 ${overviewLoading ? 'animate-spin' : ''}`} />
                   </button>
 
-                  <button
-                    onClick={handleExport}
-                    disabled={isExporting}
-                    className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50"
-                    title="Export"
-                  >
-                    {isExporting ? (
-                      <LoadingSpinner size="sm" />
-                    ) : (
-                      <DocumentArrowDownIcon className="h-5 w-5" />
-                    )}
-                  </button>
+                  <div className="relative">
+                    <select
+                      value=""
+                      onChange={(e) => e.target.value && handleExport(e.target.value as any)}
+                      disabled={isExporting}
+                      className="appearance-none bg-white border border-gray-300 rounded-md px-3 py-2 pr-8 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    >
+                      <option value="">Export...</option>
+                      <option value="pdf">Export as PDF</option>
+                      <option value="excel">Export as Excel</option>
+                      <option value="csv">Export as CSV</option>
+                    </select>
+                    <DocumentArrowDownIcon className="h-4 w-4 absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 pointer-events-none" />
+                  </div>
 
                   <button
-                    className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
-                    title="Settings"
+                    onClick={() => setShowInsights(!showInsights)}
+                    className={`p-2 rounded-md transition-colors ${
+                      showInsights 
+                        ? 'text-blue-600 bg-blue-50 hover:bg-blue-100' 
+                        : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+                    }`}
+                    title="Toggle AI insights"
                   >
-                    <Cog6ToothIcon className="h-5 w-5" />
+                    <LightBulbIcon className="h-5 w-5" />
                   </button>
                 </div>
               </div>
@@ -302,181 +309,180 @@ const Dashboard: React.FC = () => {
 
         {/* Main Content */}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          {/* Overview Metrics */}
-          <section className="mb-8">
-            <div className="mb-6">
-              <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-2">
-                Performance Overview
-              </h2>
-              <p className="text-sm text-gray-500 dark:text-gray-400">
-                Key metrics from {dateRange.startDate.toLocaleDateString()} to {dateRange.endDate.toLocaleDateString()}
-              </p>
-            </div>
-
-            {overviewLoading ? (
-              <MetricCardsGrid columns={4}>
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <MetricCardSkeleton key={i} />
-                ))}
-              </MetricCardsGrid>
-            ) : (
-              <MetricCardsGrid columns={4}>
-                <MetricCard
-                  title="Total Spend"
-                  value={overview?.summary?.totalSpend || 0}
-                  previousValue={overview?.summary?.trends?.spendTrend}
-                  format="currency"
-                  icon={<CurrencyDollarIcon className="h-6 w-6" />}
-                  color="blue"
-                />
-                
-                <MetricCard
-                  title="Total Clicks"
-                  value={overview?.summary?.totalClicks || 0}
-                  previousValue={overview?.summary?.trends?.clicksTrend}
-                  format="number"
-                  icon={<CursorArrowRaysIcon className="h-6 w-6" />}
-                  color="green"
-                />
-                
-                <MetricCard
-                  title="Conversions"
-                  value={overview?.summary?.totalConversions || 0}
-                  previousValue={overview?.summary?.trends?.conversionsTrend}
-                  format="number"
-                  icon={<ArrowTrendingUpIcon className="h-6 w-6" />}
-                  color="purple"
-                />
-                
-                <MetricCard
-                  title="ROAS"
-                  value={overview?.summary?.averageROAS || 0}
-                  previousValue={overview?.summary?.trends?.roasTrend}
-                  format="number"
-                  icon={<ChartBarIcon className="h-6 w-6" />}
-                  color="indigo"
-                  description="Return on Ad Spend"
-                />
-              </MetricCardsGrid>
-            )}
-          </section>
+          {/* Key Metrics Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+            <MetricCard
+              title="Total Spend"
+              value={formatCurrency(currentMetrics?.spend || 0)}
+              change={overview?.summary?.change?.spend}
+              icon={CurrencyDollarIcon}
+              trend={getTrendDirection(overview?.summary?.change?.spend || 0)}
+              loading={overviewLoading}
+            />
+            
+            <MetricCard
+              title="Total Clicks"
+              value={formatNumber(currentMetrics?.clicks || 0)}
+              change={overview?.summary?.change?.clicks}
+              icon={CursorArrowRaysIcon}
+              trend={getTrendDirection(overview?.summary?.change?.clicks || 0)}
+              loading={overviewLoading}
+            />
+            
+            <MetricCard
+              title="Conversions"
+              value={formatNumber(currentMetrics?.conversions || 0)}
+              change={overview?.summary?.change?.conversions}
+              icon={ChartBarIcon}
+              trend={getTrendDirection(overview?.summary?.change?.conversions || 0)}
+              loading={overviewLoading}
+            />
+            
+            <MetricCard
+              title="ROAS"
+              value={`${formatNumber(currentMetrics?.roas || 0, 2)}x`}
+              change={overview?.summary?.change?.roas}
+              icon={ArrowTrendingUpIcon}
+              trend={getTrendDirection(overview?.summary?.change?.roas || 0)}
+              loading={overviewLoading}
+            />
+          </div>
 
           {/* Charts Section */}
-          <section className="mb-8">
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-              {/* Performance Chart */}
-              <div className="xl:col-span-2">
-                <PerformanceChart
-                  data={chartData?.chartData || []}
-                  metrics={selectedMetrics}
-                  title="Performance Trends"
-                  loading={chartLoading}
-                  height={400}
-                  showBrush={true}
-                  timeRange="day"
-                />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+            {/* Performance Chart */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-lg font-semibold text-gray-900">Performance Trends</h3>
+                <div className="flex items-center space-x-2">
+                  <select
+                    value={selectedMetrics[0] || 'spend'}
+                    onChange={(e) => setSelectedMetrics([e.target.value, ...selectedMetrics.slice(1)])}
+                    className="text-sm border border-gray-300 rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="spend">Spend</option>
+                    <option value="clicks">Clicks</option>
+                    <option value="conversions">Conversions</option>
+                    <option value="roas">ROAS</option>
+                  </select>
+                </div>
               </div>
-
-              {/* Platform Comparison */}
-              <div>
-                <PlatformComparison
-                  data={platformData?.comparison || []}
-                  metric="spend"
-                  title="Platform Performance"
-                  loading={platformLoading}
-                  height={400}
-                />
-              </div>
+              
+              <PerformanceChart
+                data={metricsData?.current}
+                comparisonData={metricsData?.comparison}
+                loading={metricsLoading}
+                selectedMetric={selectedMetrics[0] || 'spend'}
+                height={300}
+              />
             </div>
-          </section>
 
-          {/* AI Insights & Alerts */}
+            {/* Platform Comparison */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-6">Platform Performance</h3>
+              
+              <PlatformComparison
+                data={overview?.platforms}
+                loading={overviewLoading}
+                metric="roas"
+                height={300}
+              />
+            </div>
+          </div>
+
+          {/* AI Insights and Alerts */}
           {showInsights && (
-            <section className="mb-8">
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* AI Insights */}
-                <div>
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                      AI Insights
-                    </h3>
-                    <LightBulbIcon className="h-5 w-5 text-yellow-500" />
-                  </div>
-                  
-                  {insightsLoading ? (
-                    <div className="space-y-4">
-                      {Array.from({ length: 3 }).map((_, i) => (
-                        <div key={i} className="h-24 bg-gray-200 dark:bg-gray-700 rounded-lg animate-pulse" />
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="space-y-4">
-                      {aiInsights?.slice(0, 3).map((insight: any, index: number) => (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
+              {/* AI Insights */}
+              <div className="lg:col-span-2">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">AI Insights</h3>
+                <div className="space-y-4">
+                  <AnimatePresence>
+                    {aiInsights?.map((insight, index) => (
+                      <motion.div
+                        key={insight.id}
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -20 }}
+                        transition={{ delay: index * 0.1 }}
+                      >
                         <AIInsightCard
-                          key={insight.id || index}
                           insight={insight}
-                          onDismiss={() => {
-                            // Handle insight dismissal
+                          onAccept={(id) => {
+                            // Handle insight acceptance
+                            toast.success('Insight marked as useful');
                           }}
-                          onApply={() => {
-                            // Handle insight application
+                          onDismiss={(id) => {
+                            // Handle insight dismissal
+                            toast.success('Insight dismissed');
                           }}
                         />
-                      ))}
-                      
-                      {!aiInsights?.length && (
-                        <div className="text-center py-8 text-gray-500 dark:text-gray-400">
-                          <LightBulbIcon className="h-12 w-12 mx-auto mb-2 opacity-50" />
-                          <p>No insights available yet</p>
-                          <p className="text-sm">Check back once you have more data</p>
-                        </div>
-                      )}
+                      </motion.div>
+                    ))}
+                  </AnimatePresence>
+                  
+                  {insightsLoading && (
+                    <div className="flex items-center justify-center py-8">
+                      <LoadingSpinner size="md" />
+                    </div>
+                  )}
+                  
+                  {!insightsLoading && (!aiInsights || aiInsights.length === 0) && (
+                    <div className="text-center py-8 text-gray-500">
+                      <LightBulbIcon className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+                      <p>No insights available for the selected period.</p>
                     </div>
                   )}
                 </div>
-
-                {/* Recent Alerts */}
-                <div>
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                      Recent Alerts
-                    </h3>
-                    <ExclamationTriangleIcon className="h-5 w-5 text-orange-500" />
-                  </div>
-                  
-                  <AlertsList
-                    alerts={overview?.alerts || []}
-                    maxItems={5}
-                    showActions={true}
-                  />
-                </div>
               </div>
-            </section>
+
+              {/* Alerts */}
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">Recent Alerts</h3>
+                <AlertsList
+                  alerts={overview?.alerts?.recent || []}
+                  loading={overviewLoading}
+                  onMarkAsRead={(alertId) => {
+                    // Handle mark as read
+                    toast.success('Alert marked as read');
+                  }}
+                  onDismiss={(alertId) => {
+                    // Handle dismiss
+                    toast.success('Alert dismissed');
+                  }}
+                />
+              </div>
+            </div>
           )}
 
           {/* Top Campaigns Table */}
-          <section>
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                Top Performing Campaigns
-              </h3>
-              <button className="flex items-center space-x-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors">
-                <PlusIcon className="h-4 w-4" />
-                <span>New Campaign</span>
-              </button>
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-gray-900">Top Performing Campaigns</h3>
+                <button
+                  onClick={() => {
+                    // Navigate to campaigns page
+                    window.location.href = '/campaigns';
+                  }}
+                  className="text-sm text-blue-600 hover:text-blue-700 font-medium"
+                >
+                  View all campaigns →
+                </button>
+              </div>
             </div>
-
+            
             <CampaignTable
-              campaigns={topCampaigns?.campaigns || []}
-              loading={campaignsLoading}
+              campaigns={overview?.topCampaigns || []}
+              loading={overviewLoading}
+              showPagination={false}
+              maxRows={5}
               onCampaignClick={(campaign) => {
-                // Navigate to campaign details
+                // Navigate to campaign detail
+                window.location.href = `/campaigns/${campaign.id}`;
               }}
-              showActions={true}
-              sortBy="roas"
-              sortOrder="desc"
             />
-          </section>
+          </div>
         </div>
       </div>
     </>
