@@ -1,946 +1,451 @@
+// backend/src/controllers/auth.controller.ts
 import { Request, Response, NextFunction } from 'express';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
-import rateLimit from 'express-rate-limit';
-import Redis from 'ioredis';
-
-import { AuthService } from '../services/auth.service';
-import { EmailService } from '../services/email.service';
+import { AuthService, LoginCredentials, RegisterData } from '../services/auth.service';
 import { logger } from '../utils/logger';
-import { generateTokens, verifyRefreshToken } from '../utils/jwt.utils';
-import { ValidationError, UnauthorizedError } from '../middleware/error.middleware';
+import { ValidationError } from '../middleware/error.middleware';
 
 // Validation schemas
 const registerSchema = z.object({
   email: z.string().email('Invalid email format'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-  firstName: z.string().min(1, 'First name is required'),
-  lastName: z.string().min(1, 'Last name is required'),
-  company: z.string().optional(),
-  phone: z.string().optional(),
-  agreeToTerms: z.boolean().refine(val => val === true, 'You must agree to terms'),
+  password: z.string()
+    .min(8, 'Password must be at least 8 characters')
+    .regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/, 
+      'Password must contain at least one uppercase letter, one lowercase letter, one number and one special character'),
+  firstName: z.string().min(1, 'First name is required').max(50),
+  lastName: z.string().min(1, 'Last name is required').max(50),
+  organizationName: z.string().max(100).optional(),
+  acceptTerms: z.boolean().refine(val => val === true, 'You must accept the terms and conditions')
 });
 
 const loginSchema = z.object({
   email: z.string().email('Invalid email format'),
   password: z.string().min(1, 'Password is required'),
-  rememberMe: z.boolean().optional(),
+  rememberMe: z.boolean().optional()
 });
 
-const forgotPasswordSchema = z.object({
-  email: z.string().email('Invalid email format'),
+const refreshTokenSchema = z.object({
+  refreshToken: z.string().min(1, 'Refresh token is required')
+});
+
+const verifyEmailSchema = z.object({
+  token: z.string().min(1, 'Token is required')
+});
+
+const requestPasswordResetSchema = z.object({
+  email: z.string().email('Invalid email format')
 });
 
 const resetPasswordSchema = z.object({
-  token: z.string().min(1, 'Reset token is required'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  token: z.string().min(1, 'Token is required'),
+  newPassword: z.string()
+    .min(8, 'Password must be at least 8 characters')
+    .regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/, 
+      'Password must contain at least one uppercase letter, one lowercase letter, one number and one special character')
 });
 
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1, 'Current password is required'),
-  newPassword: z.string().min(8, 'New password must be at least 8 characters'),
+  newPassword: z.string()
+    .min(8, 'Password must be at least 8 characters')
+    .regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/, 
+      'Password must contain at least one uppercase letter, one lowercase letter, one number and one special character')
 });
 
-// Rate limiting for auth endpoints
-export const authRateLimit = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // 5 attempts per window
-  message: {
-    success: false,
-    error: 'Too many authentication attempts, please try again later.',
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
+const updateProfileSchema = z.object({
+  firstName: z.string().min(1).max(50).optional(),
+  lastName: z.string().min(1).max(50).optional(),
+  avatar: z.string().url().optional(),
+  preferences: z.any().optional()
 });
 
-export const strictAuthRateLimit = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 3, // 3 attempts per hour
-  message: {
-    success: false,
-    error: 'Too many failed attempts, please try again in an hour.',
-  },
+const createApiKeySchema = z.object({
+  name: z.string().min(1, 'API key name is required').max(100),
+  permissions: z.any().optional()
 });
-
-interface AuthenticatedRequest extends Request {
-  user?: {
-    id: string;
-    email: string;
-    role: string;
-  };
-}
 
 export class AuthController {
-  private prisma: PrismaClient;
-  private redis: Redis;
   private authService: AuthService;
-  private emailService: EmailService;
 
-  constructor(prisma: PrismaClient, redis: Redis) {
-    this.prisma = prisma;
-    this.redis = redis;
-    this.authService = new AuthService(prisma, redis);
-    this.emailService = new EmailService();
+  constructor() {
+    this.authService = new AuthService();
   }
 
   /**
-   * @swagger
-   * /api/auth/register:
-   *   post:
-   *     summary: Register a new user
-   *     tags: [Authentication]
-   *     requestBody:
-   *       required: true
-   *       content:
-   *         application/json:
-   *           schema:
-   *             type: object
-   *             required:
-   *               - email
-   *               - password
-   *               - firstName
-   *               - lastName
-   *               - agreeToTerms
-   *             properties:
-   *               email:
-   *                 type: string
-   *                 format: email
-   *               password:
-   *                 type: string
-   *                 minLength: 8
-   *               firstName:
-   *                 type: string
-   *               lastName:
-   *                 type: string
-   *               company:
-   *                 type: string
-   *               phone:
-   *                 type: string
-   *               agreeToTerms:
-   *                 type: boolean
-   *     responses:
-   *       201:
-   *         description: User registered successfully
-   *       400:
-   *         description: Validation error
-   *       409:
-   *         description: User already exists
+   * Register a new user
    */
-  public register = async (
-    req: Request,
-    res: Response,
-    next: NextFunction
-  ): Promise<void> => {
+  static async register(req: Request, res: Response, next: NextFunction) {
     try {
-      const validatedData = registerSchema.parse(req.body);
+      const controller = new AuthController();
+      const data = registerSchema.parse(req.body);
 
-      // Check if user already exists
-      const existingUser = await this.prisma.user.findUnique({
-        where: { email: validatedData.email.toLowerCase() },
-      });
+      const result = await controller.authService.register(data);
 
-      if (existingUser) {
-        res.status(409).json({
-          success: false,
-          error: 'User already exists with this email',
-        });
-        return;
-      }
-
-      // Hash password
-      const hashedPassword = await bcrypt.hash(validatedData.password, 12);
-
-      // Create user
-      const user = await this.prisma.user.create({
-        data: {
-          email: validatedData.email.toLowerCase(),
-          password: hashedPassword,
-          firstName: validatedData.firstName,
-          lastName: validatedData.lastName,
-          company: validatedData.company,
-          phone: validatedData.phone,
-          role: 'USER',
-          isActive: true,
-          emailVerified: false,
-        },
-        select: {
-          id: true,
-          email: true,
-          firstName: true,
-          lastName: true,
-          company: true,
-          role: true,
-          isActive: true,
-          emailVerified: true,
-          createdAt: true,
-        },
-      });
-
-      // Generate email verification token
-      const verificationToken = await this.authService.generateEmailVerificationToken(user.id);
-
-      // Send verification email
-      await this.emailService.sendVerificationEmail(
-        user.email,
-        user.firstName,
-        verificationToken
-      );
-
-      // Generate auth tokens
-      const tokens = generateTokens({
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-      });
-
-      // Store refresh token
-      await this.authService.storeRefreshToken(user.id, tokens.refreshToken);
-
-      logger.info('User registered successfully', {
-        userId: user.id,
-        email: user.email,
-        ip: req.ip,
+      // Set refresh token as HTTP-only cookie
+      res.cookie('refreshToken', result.tokens.refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
       });
 
       res.status(201).json({
         success: true,
-        message: 'Registration successful. Please check your email for verification.',
+        message: 'User registered successfully. Please check your email to verify your account.',
         data: {
-          user,
-          tokens,
-        },
+          user: result.user,
+          accessToken: result.tokens.accessToken,
+          expiresIn: result.tokens.expiresIn
+        }
       });
+
+      logger.info(`User registered: ${data.email}`);
     } catch (error) {
       if (error instanceof z.ZodError) {
-        const formattedErrors = error.errors.map(err => ({
-          field: err.path.join('.'),
-          message: err.message,
-        }));
-        
-        res.status(400).json({
-          success: false,
-          error: 'Validation failed',
-          details: formattedErrors,
-        });
-        return;
+        return next(new ValidationError('Validation failed', error.errors));
       }
       next(error);
     }
-  };
+  }
 
   /**
-   * @swagger
-   * /api/auth/login:
-   *   post:
-   *     summary: Login user
-   *     tags: [Authentication]
-   *     requestBody:
-   *       required: true
-   *       content:
-   *         application/json:
-   *           schema:
-   *             type: object
-   *             required:
-   *               - email
-   *               - password
-   *             properties:
-   *               email:
-   *                 type: string
-   *                 format: email
-   *               password:
-   *                 type: string
-   *               rememberMe:
-   *                 type: boolean
-   *     responses:
-   *       200:
-   *         description: Login successful
-   *       401:
-   *         description: Invalid credentials
-   *       403:
-   *         description: Account disabled
+   * Login user
    */
-  public login = async (
-    req: Request,
-    res: Response,
-    next: NextFunction
-  ): Promise<void> => {
+  static async login(req: Request, res: Response, next: NextFunction) {
     try {
-      const validatedData = loginSchema.parse(req.body);
+      const controller = new AuthController();
+      const credentials = loginSchema.parse(req.body);
 
-      // Find user
-      const user = await this.prisma.user.findUnique({
-        where: { email: validatedData.email.toLowerCase() },
-        select: {
-          id: true,
-          email: true,
-          password: true,
-          firstName: true,
-          lastName: true,
-          company: true,
-          role: true,
-          isActive: true,
-          emailVerified: true,
-          lastLoginAt: true,
-          createdAt: true,
-        },
+      const result = await controller.authService.login(credentials);
+
+      // Set refresh token as HTTP-only cookie
+      res.cookie('refreshToken', result.tokens.refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: credentials.rememberMe ? 30 * 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000
       });
 
-      if (!user) {
-        res.status(401).json({
-          success: false,
-          error: 'Invalid email or password',
-        });
-        return;
-      }
-
-      // Check if account is active
-      if (!user.isActive) {
-        res.status(403).json({
-          success: false,
-          error: 'Account is disabled. Please contact support.',
-        });
-        return;
-      }
-
-      // Verify password
-      const isPasswordValid = await bcrypt.compare(validatedData.password, user.password);
-
-      if (!isPasswordValid) {
-        // Log failed login attempt
-        logger.warning('Failed login attempt', {
-          email: validatedData.email,
-          ip: req.ip,
-          userAgent: req.get('User-Agent'),
-        });
-
-        res.status(401).json({
-          success: false,
-          error: 'Invalid email or password',
-        });
-        return;
-      }
-
-      // Generate tokens
-      const tokens = generateTokens({
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-      }, validatedData.rememberMe);
-
-      // Store refresh token
-      await this.authService.storeRefreshToken(user.id, tokens.refreshToken);
-
-      // Update last login
-      await this.prisma.user.update({
-        where: { id: user.id },
-        data: { lastLoginAt: new Date() },
-      });
-
-      // Remove password from response
-      const { password, ...userWithoutPassword } = user;
-
-      logger.info('User logged in successfully', {
-        userId: user.id,
-        email: user.email,
-        ip: req.ip,
-      });
-
-      res.status(200).json({
+      res.json({
         success: true,
         message: 'Login successful',
         data: {
-          user: userWithoutPassword,
-          tokens,
-        },
+          user: result.user,
+          accessToken: result.tokens.accessToken,
+          expiresIn: result.tokens.expiresIn
+        }
       });
+
+      logger.info(`User logged in: ${credentials.email}`);
     } catch (error) {
       if (error instanceof z.ZodError) {
-        const formattedErrors = error.errors.map(err => ({
-          field: err.path.join('.'),
-          message: err.message,
-        }));
-        
-        res.status(400).json({
-          success: false,
-          error: 'Validation failed',
-          details: formattedErrors,
-        });
-        return;
+        return next(new ValidationError('Validation failed', error.errors));
       }
       next(error);
     }
-  };
+  }
 
   /**
-   * @swagger
-   * /api/auth/refresh:
-   *   post:
-   *     summary: Refresh access token
-   *     tags: [Authentication]
-   *     requestBody:
-   *       required: true
-   *       content:
-   *         application/json:
-   *           schema:
-   *             type: object
-   *             required:
-   *               - refreshToken
-   *             properties:
-   *               refreshToken:
-   *                 type: string
-   *     responses:
-   *       200:
-   *         description: Token refreshed successfully
-   *       401:
-   *         description: Invalid refresh token
+   * Refresh access token
    */
-  public refreshToken = async (
-    req: Request,
-    res: Response,
-    next: NextFunction
-  ): Promise<void> => {
+  static async refreshToken(req: Request, res: Response, next: NextFunction) {
     try {
-      const { refreshToken } = req.body;
-
-      if (!refreshToken) {
-        res.status(401).json({
-          success: false,
-          error: 'Refresh token is required',
-        });
-        return;
-      }
-
-      // Verify refresh token
-      const payload = verifyRefreshToken(refreshToken);
+      const controller = new AuthController();
       
-      // Check if token is valid in Redis
-      const isValidToken = await this.authService.validateRefreshToken(
-        payload.userId,
-        refreshToken
-      );
-
-      if (!isValidToken) {
-        res.status(401).json({
+      // Get refresh token from cookie or body
+      const refreshToken = req.cookies.refreshToken || req.body.refreshToken;
+      
+      if (!refreshToken) {
+        return res.status(401).json({
           success: false,
-          error: 'Invalid refresh token',
+          message: 'Refresh token not provided'
         });
-        return;
       }
 
-      // Get user details
-      const user = await this.prisma.user.findUnique({
-        where: { id: payload.userId },
-        select: {
-          id: true,
-          email: true,
-          role: true,
-          isActive: true,
-        },
+      const tokens = await controller.authService.refreshToken(refreshToken);
+
+      // Set new refresh token as HTTP-only cookie
+      res.cookie('refreshToken', tokens.refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
       });
 
-      if (!user || !user.isActive) {
-        res.status(401).json({
-          success: false,
-          error: 'User not found or inactive',
-        });
-        return;
-      }
-
-      // Generate new tokens
-      const newTokens = generateTokens({
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-      });
-
-      // Store new refresh token and remove old one
-      await this.authService.rotateRefreshToken(
-        user.id,
-        refreshToken,
-        newTokens.refreshToken
-      );
-
-      res.status(200).json({
+      res.json({
         success: true,
         message: 'Token refreshed successfully',
         data: {
-          tokens: newTokens,
-        },
-      });
-    } catch (error) {
-      logger.error('Token refresh error:', error);
-      res.status(401).json({
-        success: false,
-        error: 'Invalid refresh token',
-      });
-    }
-  };
-
-  /**
-   * @swagger
-   * /api/auth/logout:
-   *   post:
-   *     summary: Logout user
-   *     tags: [Authentication]
-   *     security:
-   *       - bearerAuth: []
-   *     requestBody:
-   *       content:
-   *         application/json:
-   *           schema:
-   *             type: object
-   *             properties:
-   *               refreshToken:
-   *                 type: string
-   *     responses:
-   *       200:
-   *         description: Logout successful
-   */
-  public logout = async (
-    req: AuthenticatedRequest,
-    res: Response,
-    next: NextFunction
-  ): Promise<void> => {
-    try {
-      const { refreshToken } = req.body;
-      const userId = req.user?.id;
-
-      if (userId) {
-        // Remove refresh token(s)
-        if (refreshToken) {
-          await this.authService.revokeRefreshToken(userId, refreshToken);
-        } else {
-          // Remove all refresh tokens for the user
-          await this.authService.revokeAllRefreshTokens(userId);
+          accessToken: tokens.accessToken,
+          expiresIn: tokens.expiresIn
         }
-
-        logger.info('User logged out', {
-          userId,
-          ip: req.ip,
-        });
-      }
-
-      res.status(200).json({
-        success: true,
-        message: 'Logout successful',
       });
     } catch (error) {
       next(error);
     }
-  };
+  }
 
   /**
-   * @swagger
-   * /api/auth/forgot-password:
-   *   post:
-   *     summary: Request password reset
-   *     tags: [Authentication]
-   *     requestBody:
-   *       required: true
-   *       content:
-   *         application/json:
-   *           schema:
-   *             type: object
-   *             required:
-   *               - email
-   *             properties:
-   *               email:
-   *                 type: string
-   *                 format: email
-   *     responses:
-   *       200:
-   *         description: Password reset email sent
+   * Logout user
    */
-  public forgotPassword = async (
-    req: Request,
-    res: Response,
-    next: NextFunction
-  ): Promise<void> => {
+  static async logout(req: Request, res: Response, next: NextFunction) {
     try {
-      const { email } = forgotPasswordSchema.parse(req.body);
+      const controller = new AuthController();
+      const userId = req.user!.id;
+      const refreshToken = req.cookies.refreshToken;
 
-      const user = await this.prisma.user.findUnique({
-        where: { email: email.toLowerCase() },
-        select: {
-          id: true,
-          email: true,
-          firstName: true,
-          isActive: true,
-        },
-      });
+      await controller.authService.logout(userId, refreshToken);
 
-      // Always return success to prevent email enumeration
-      if (!user || !user.isActive) {
-        res.status(200).json({
-          success: true,
-          message: 'If the email exists, a password reset link has been sent.',
-        });
-        return;
-      }
+      // Clear refresh token cookie
+      res.clearCookie('refreshToken');
 
-      // Generate reset token
-      const resetToken = await this.authService.generatePasswordResetToken(user.id);
-
-      // Send reset email
-      await this.emailService.sendPasswordResetEmail(
-        user.email,
-        user.firstName,
-        resetToken
-      );
-
-      logger.info('Password reset requested', {
-        userId: user.id,
-        email: user.email,
-        ip: req.ip,
-      });
-
-      res.status(200).json({
+      res.json({
         success: true,
-        message: 'If the email exists, a password reset link has been sent.',
+        message: 'Logout successful'
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Verify email address
+   */
+  static async verifyEmail(req: Request, res: Response, next: NextFunction) {
+    try {
+      const controller = new AuthController();
+      const { token } = verifyEmailSchema.parse(req.body);
+
+      const result = await controller.authService.verifyEmail(token);
+
+      res.json({
+        success: result.success,
+        message: result.message
       });
     } catch (error) {
       if (error instanceof z.ZodError) {
-        const formattedErrors = error.errors.map(err => ({
-          field: err.path.join('.'),
-          message: err.message,
-        }));
-        
-        res.status(400).json({
-          success: false,
-          error: 'Validation failed',
-          details: formattedErrors,
-        });
-        return;
+        return next(new ValidationError('Validation failed', error.errors));
       }
       next(error);
     }
-  };
+  }
 
   /**
-   * @swagger
-   * /api/auth/reset-password:
-   *   post:
-   *     summary: Reset password with token
-   *     tags: [Authentication]
-   *     requestBody:
-   *       required: true
-   *       content:
-   *         application/json:
-   *           schema:
-   *             type: object
-   *             required:
-   *               - token
-   *               - password
-   *             properties:
-   *               token:
-   *                 type: string
-   *               password:
-   *                 type: string
-   *                 minLength: 8
-   *     responses:
-   *       200:
-   *         description: Password reset successfully
-   *       400:
-   *         description: Invalid or expired token
+   * Request password reset
    */
-  public resetPassword = async (
-    req: Request,
-    res: Response,
-    next: NextFunction
-  ): Promise<void> => {
+  static async requestPasswordReset(req: Request, res: Response, next: NextFunction) {
     try {
-      const { token, password } = resetPasswordSchema.parse(req.body);
+      const controller = new AuthController();
+      const { email } = requestPasswordResetSchema.parse(req.body);
 
-      // Verify reset token
-      const userId = await this.authService.verifyPasswordResetToken(token);
+      const result = await controller.authService.requestPasswordReset(email);
 
-      if (!userId) {
-        res.status(400).json({
-          success: false,
-          error: 'Invalid or expired reset token',
-        });
-        return;
-      }
-
-      // Hash new password
-      const hashedPassword = await bcrypt.hash(password, 12);
-
-      // Update password
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { 
-          password: hashedPassword,
-          passwordChangedAt: new Date(),
-        },
-      });
-
-      // Revoke all existing tokens
-      await this.authService.revokeAllRefreshTokens(userId);
-
-      logger.info('Password reset successfully', {
-        userId,
-        ip: req.ip,
-      });
-
-      res.status(200).json({
-        success: true,
-        message: 'Password reset successfully. Please login with your new password.',
+      res.json({
+        success: result.success,
+        message: result.message
       });
     } catch (error) {
       if (error instanceof z.ZodError) {
-        const formattedErrors = error.errors.map(err => ({
-          field: err.path.join('.'),
-          message: err.message,
-        }));
-        
-        res.status(400).json({
-          success: false,
-          error: 'Validation failed',
-          details: formattedErrors,
-        });
-        return;
+        return next(new ValidationError('Validation failed', error.errors));
       }
       next(error);
     }
-  };
+  }
 
   /**
-   * @swagger
-   * /api/auth/change-password:
-   *   post:
-   *     summary: Change password for authenticated user
-   *     tags: [Authentication]
-   *     security:
-   *       - bearerAuth: []
-   *     requestBody:
-   *       required: true
-   *       content:
-   *         application/json:
-   *           schema:
-   *             type: object
-   *             required:
-   *               - currentPassword
-   *               - newPassword
-   *             properties:
-   *               currentPassword:
-   *                 type: string
-   *               newPassword:
-   *                 type: string
-   *                 minLength: 8
-   *     responses:
-   *       200:
-   *         description: Password changed successfully
-   *       401:
-   *         description: Current password is incorrect
+   * Reset password
    */
-  public changePassword = async (
-    req: AuthenticatedRequest,
-    res: Response,
-    next: NextFunction
-  ): Promise<void> => {
+  static async resetPassword(req: Request, res: Response, next: NextFunction) {
     try {
+      const controller = new AuthController();
+      const data = resetPasswordSchema.parse(req.body);
+
+      const result = await controller.authService.resetPassword(data);
+
+      res.json({
+        success: result.success,
+        message: result.message
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return next(new ValidationError('Validation failed', error.errors));
+      }
+      next(error);
+    }
+  }
+
+  /**
+   * Get current user profile
+   */
+  static async getProfile(req: Request, res: Response, next: NextFunction) {
+    try {
+      const controller = new AuthController();
+      const userId = req.user!.id;
+
+      const profile = await controller.authService.getUserProfile(userId);
+
+      res.json({
+        success: true,
+        data: profile
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Update user profile
+   */
+  static async updateProfile(req: Request, res: Response, next: NextFunction) {
+    try {
+      const controller = new AuthController();
+      const userId = req.user!.id;
+      const updates = updateProfileSchema.parse(req.body);
+
+      const profile = await controller.authService.updateProfile(userId, updates);
+
+      res.json({
+        success: true,
+        message: 'Profile updated successfully',
+        data: profile
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return next(new ValidationError('Validation failed', error.errors));
+      }
+      next(error);
+    }
+  }
+
+  /**
+   * Change password
+   */
+  static async changePassword(req: Request, res: Response, next: NextFunction) {
+    try {
+      const controller = new AuthController();
+      const userId = req.user!.id;
       const { currentPassword, newPassword } = changePasswordSchema.parse(req.body);
-      const userId = req.user?.id;
 
-      if (!userId) {
-        throw new UnauthorizedError('User not authenticated');
-      }
+      const result = await controller.authService.changePassword(userId, currentPassword, newPassword);
 
-      // Get current user with password
-      const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        select: {
-          id: true,
-          password: true,
-        },
-      });
-
-      if (!user) {
-        throw new UnauthorizedError('User not found');
-      }
-
-      // Verify current password
-      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
-
-      if (!isCurrentPasswordValid) {
-        res.status(401).json({
-          success: false,
-          error: 'Current password is incorrect',
-        });
-        return;
-      }
-
-      // Hash new password
-      const hashedNewPassword = await bcrypt.hash(newPassword, 12);
-
-      // Update password
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { 
-          password: hashedNewPassword,
-          passwordChangedAt: new Date(),
-        },
-      });
-
-      logger.info('Password changed successfully', {
-        userId,
-        ip: req.ip,
-      });
-
-      res.status(200).json({
-        success: true,
-        message: 'Password changed successfully',
+      res.json({
+        success: result.success,
+        message: result.message
       });
     } catch (error) {
       if (error instanceof z.ZodError) {
-        const formattedErrors = error.errors.map(err => ({
-          field: err.path.join('.'),
-          message: err.message,
-        }));
-        
-        res.status(400).json({
-          success: false,
-          error: 'Validation failed',
-          details: formattedErrors,
-        });
-        return;
+        return next(new ValidationError('Validation failed', error.errors));
       }
       next(error);
     }
-  };
+  }
 
   /**
-   * @swagger
-   * /api/auth/verify-email:
-   *   post:
-   *     summary: Verify email address
-   *     tags: [Authentication]
-   *     requestBody:
-   *       required: true
-   *       content:
-   *         application/json:
-   *           schema:
-   *             type: object
-   *             required:
-   *               - token
-   *             properties:
-   *               token:
-   *                 type: string
-   *     responses:
-   *       200:
-   *         description: Email verified successfully
-   *       400:
-   *         description: Invalid or expired token
+   * Create API key
    */
-  public verifyEmail = async (
-    req: Request,
-    res: Response,
-    next: NextFunction
-  ): Promise<void> => {
+  static async createApiKey(req: Request, res: Response, next: NextFunction) {
     try {
-      const { token } = req.body;
+      const controller = new AuthController();
+      const userId = req.user!.id;
+      const { name, permissions } = createApiKeySchema.parse(req.body);
 
-      if (!token) {
-        res.status(400).json({
-          success: false,
-          error: 'Verification token is required',
-        });
-        return;
-      }
+      const apiKey = await controller.authService.createApiKey(userId, name, permissions);
 
-      // Verify email token
-      const userId = await this.authService.verifyEmailVerificationToken(token);
-
-      if (!userId) {
-        res.status(400).json({
-          success: false,
-          error: 'Invalid or expired verification token',
-        });
-        return;
-      }
-
-      // Update user email verification status
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { 
-          emailVerified: true,
-          emailVerifiedAt: new Date(),
-        },
-      });
-
-      logger.info('Email verified successfully', {
-        userId,
-        ip: req.ip,
-      });
-
-      res.status(200).json({
+      res.status(201).json({
         success: true,
-        message: 'Email verified successfully',
+        message: 'API key created successfully',
+        data: {
+          id: apiKey.id,
+          name: apiKey.name,
+          key: apiKey.key, // Only shown once
+          createdAt: apiKey.createdAt
+        }
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return next(new ValidationError('Validation failed', error.errors));
+      }
+      next(error);
+    }
+  }
+
+  /**
+   * Get user's API keys (without the actual key values)
+   */
+  static async getApiKeys(req: Request, res: Response, next: NextFunction) {
+    try {
+      const controller = new AuthController();
+      const userId = req.user!.id;
+
+      // This would be implemented in the auth service
+      // For now, just return a placeholder response
+      res.json({
+        success: true,
+        data: {
+          apiKeys: []
+        }
       });
     } catch (error) {
       next(error);
     }
-  };
+  }
 
   /**
-   * @swagger
-   * /api/auth/me:
-   *   get:
-   *     summary: Get current user profile
-   *     tags: [Authentication]
-   *     security:
-   *       - bearerAuth: []
-   *     responses:
-   *       200:
-   *         description: User profile retrieved successfully
-   *       401:
-   *         description: Not authenticated
+   * Revoke API key
    */
-  public getCurrentUser = async (
-    req: AuthenticatedRequest,
-    res: Response,
-    next: NextFunction
-  ): Promise<void> => {
+  static async revokeApiKey(req: Request, res: Response, next: NextFunction) {
     try {
-      const userId = req.user?.id;
+      const controller = new AuthController();
+      const userId = req.user!.id;
+      const keyId = req.params.keyId;
 
-      if (!userId) {
-        throw new UnauthorizedError('User not authenticated');
-      }
-
-      const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        select: {
-          id: true,
-          email: true,
-          firstName: true,
-          lastName: true,
-          company: true,
-          phone: true,
-          role: true,
-          isActive: true,
-          emailVerified: true,
-          emailVerifiedAt: true,
-          lastLoginAt: true,
-          createdAt: true,
-          updatedAt: true,
-        },
-      });
-
-      if (!user) {
-        throw new UnauthorizedError('User not found');
-      }
-
-      res.status(200).json({
+      // This would be implemented in the auth service
+      // For now, just return a placeholder response
+      res.json({
         success: true,
-        data: { user },
+        message: 'API key revoked successfully'
       });
     } catch (error) {
       next(error);
     }
-  };
+  }
+
+  /**
+   * Get authentication status/health
+   */
+  static async getAuthStatus(req: Request, res: Response, next: NextFunction) {
+    try {
+      const controller = new AuthController();
+      const health = controller.authService.getHealth();
+
+      res.json({
+        success: true,
+        data: {
+          status: health.status,
+          uptime: health.uptime,
+          metrics: controller.authService.getMetrics()
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
-export default AuthController;
+// Route definitions for easy import
+export const authRoutes = {
+  'POST /auth/register': AuthController.register,
+  'POST /auth/login': AuthController.login,
+  'POST /auth/refresh': AuthController.refreshToken,
+  'POST /auth/logout': AuthController.logout,
+  'POST /auth/verify-email': AuthController.verifyEmail,
+  'POST /auth/request-password-reset': AuthController.requestPasswordReset,
+  'POST /auth/reset-password': AuthController.resetPassword,
+  'GET /auth/profile': AuthController.getProfile,
+  'PUT /auth/profile': AuthController.updateProfile,
+  'POST /auth/change-password': AuthController.changePassword,
+  'POST /auth/api-keys': AuthController.createApiKey,
+  'GET /auth/api-keys': AuthController.getApiKeys,
+  'DELETE /auth/api-keys/:keyId': AuthController.revokeApiKey,
+  'GET /auth/status': AuthController.getAuthStatus
+};

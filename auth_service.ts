@@ -1,518 +1,603 @@
-import { PrismaClient } from '@prisma/client';
-import Redis from 'ioredis';
-import crypto from 'crypto';
+// backend/src/services/auth.service.ts
+import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
+import { PrismaClient, User, ApiKey } from '@prisma/client';
 import { logger } from '../utils/logger';
+import { BaseService } from './base.service';
+import { sendEmail } from '../utils/email';
 
-interface TokenPayload {
-  userId: string;
+export interface LoginCredentials {
   email: string;
-  role: string;
-  type: 'email_verification' | 'password_reset';
+  password: string;
+  rememberMe?: boolean;
 }
 
-interface RefreshTokenData {
+export interface RegisterData {
+  email: string;
+  password: string;
+  firstName: string;
+  lastName: string;
+  organizationName?: string;
+  acceptTerms: boolean;
+}
+
+export interface AuthTokens {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+}
+
+export interface ResetPasswordData {
   token: string;
-  userId: string;
-  expiresAt: Date;
-  createdAt: Date;
+  newPassword: string;
 }
 
-export class AuthService {
+export interface UserProfile {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  avatar?: string;
+  role: string;
+  isEmailVerified: boolean;
+  lastLoginAt?: Date;
+  createdAt: Date;
+  preferences?: any;
+  organizations?: Array<{
+    id: string;
+    name: string;
+    role: string;
+  }>;
+}
+
+export class AuthService extends BaseService {
   private prisma: PrismaClient;
-  private redis: Redis;
-  
-  // Redis key prefixes
-  private readonly REFRESH_TOKEN_PREFIX = 'refresh_token:';
-  private readonly EMAIL_VERIFICATION_PREFIX = 'email_verification:';
-  private readonly PASSWORD_RESET_PREFIX = 'password_reset:';
-  private readonly RATE_LIMIT_PREFIX = 'auth_rate_limit:';
+  private readonly JWT_SECRET: string;
+  private readonly JWT_REFRESH_SECRET: string;
+  private readonly TOKEN_EXPIRY = '15m';
+  private readonly REFRESH_TOKEN_EXPIRY = '7d';
+  private readonly RESET_TOKEN_EXPIRY = '1h';
 
-  // Token expiration times
-  private readonly EMAIL_VERIFICATION_EXPIRY = 24 * 60 * 60; // 24 hours
-  private readonly PASSWORD_RESET_EXPIRY = 60 * 60; // 1 hour
-  private readonly REFRESH_TOKEN_EXPIRY = 30 * 24 * 60 * 60; // 30 days
+  constructor() {
+    super({
+      rateLimit: {
+        maxRequests: 10,
+        windowMs: 60000, // 1 minute
+        retryAfterMs: 60000
+      },
+      timeout: 5000
+    });
 
-  constructor(prisma: PrismaClient, redis: Redis) {
-    this.prisma = prisma;
-    this.redis = redis;
-  }
+    this.prisma = new PrismaClient();
+    this.JWT_SECRET = process.env.JWT_SECRET!;
+    this.JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET!;
 
-  /**
-   * Generate a secure email verification token
-   */
-  async generateEmailVerificationToken(userId: string): Promise<string> {
-    try {
-      const token = crypto.randomBytes(32).toString('hex');
-      const key = `${this.EMAIL_VERIFICATION_PREFIX}${token}`;
-
-      await this.redis.setex(key, this.EMAIL_VERIFICATION_EXPIRY, userId);
-
-      logger.info('Email verification token generated', { userId });
-      return token;
-    } catch (error) {
-      logger.error('Error generating email verification token:', error);
-      throw new Error('Failed to generate verification token');
+    if (!this.JWT_SECRET || !this.JWT_REFRESH_SECRET) {
+      throw new Error('JWT secrets not configured');
     }
   }
 
   /**
-   * Verify email verification token
+   * Test database connection
    */
-  async verifyEmailVerificationToken(token: string): Promise<string | null> {
+  async testConnection(): Promise<{ success: boolean; message: string }> {
     try {
-      const key = `${this.EMAIL_VERIFICATION_PREFIX}${token}`;
-      const userId = await this.redis.get(key);
+      await this.prisma.$queryRaw`SELECT 1`;
+      return { success: true, message: 'Database connection successful' };
+    } catch (error) {
+      return { success: false, message: `Database connection failed: ${error.message}` };
+    }
+  }
 
-      if (!userId) {
-        return null;
+  /**
+   * Register a new user
+   */
+  async register(data: RegisterData): Promise<{ user: UserProfile; tokens: AuthTokens }> {
+    return this.executeWithPolicy('register', async () => {
+      // Check if user already exists
+      const existingUser = await this.prisma.user.findUnique({
+        where: { email: data.email.toLowerCase() }
+      });
+
+      if (existingUser) {
+        throw new Error('User already exists with this email');
       }
 
-      // Remove token after successful verification
-      await this.redis.del(key);
+      // Hash password
+      const saltRounds = 12;
+      const hashedPassword = await bcrypt.hash(data.password, saltRounds);
 
-      logger.info('Email verification token verified', { userId });
-      return userId;
-    } catch (error) {
-      logger.error('Error verifying email verification token:', error);
-      return null;
-    }
-  }
+      // Generate email verification token
+      const emailVerificationToken = crypto.randomBytes(32).toString('hex');
 
-  /**
-   * Generate a secure password reset token
-   */
-  async generatePasswordResetToken(userId: string): Promise<string> {
-    try {
-      const token = crypto.randomBytes(32).toString('hex');
-      const key = `${this.PASSWORD_RESET_PREFIX}${token}`;
-
-      await this.redis.setex(key, this.PASSWORD_RESET_EXPIRY, userId);
-
-      logger.info('Password reset token generated', { userId });
-      return token;
-    } catch (error) {
-      logger.error('Error generating password reset token:', error);
-      throw new Error('Failed to generate reset token');
-    }
-  }
-
-  /**
-   * Verify password reset token
-   */
-  async verifyPasswordResetToken(token: string): Promise<string | null> {
-    try {
-      const key = `${this.PASSWORD_RESET_PREFIX}${token}`;
-      const userId = await this.redis.get(key);
-
-      if (!userId) {
-        return null;
-      }
-
-      // Remove token after successful verification
-      await this.redis.del(key);
-
-      logger.info('Password reset token verified', { userId });
-      return userId;
-    } catch (error) {
-      logger.error('Error verifying password reset token:', error);
-      return null;
-    }
-  }
-
-  /**
-   * Store refresh token in Redis
-   */
-  async storeRefreshToken(userId: string, refreshToken: string): Promise<void> {
-    try {
-      const key = `${this.REFRESH_TOKEN_PREFIX}${userId}:${refreshToken}`;
-      const tokenData: RefreshTokenData = {
-        token: refreshToken,
-        userId,
-        expiresAt: new Date(Date.now() + this.REFRESH_TOKEN_EXPIRY * 1000),
-        createdAt: new Date(),
-      };
-
-      await this.redis.setex(
-        key,
-        this.REFRESH_TOKEN_EXPIRY,
-        JSON.stringify(tokenData)
-      );
-
-      logger.info('Refresh token stored', { userId });
-    } catch (error) {
-      logger.error('Error storing refresh token:', error);
-      throw new Error('Failed to store refresh token');
-    }
-  }
-
-  /**
-   * Validate refresh token
-   */
-  async validateRefreshToken(userId: string, refreshToken: string): Promise<boolean> {
-    try {
-      const key = `${this.REFRESH_TOKEN_PREFIX}${userId}:${refreshToken}`;
-      const tokenData = await this.redis.get(key);
-
-      if (!tokenData) {
-        return false;
-      }
-
-      const parsedData: RefreshTokenData = JSON.parse(tokenData);
-      
-      // Check if token has expired
-      if (new Date() > parsedData.expiresAt) {
-        await this.redis.del(key);
-        return false;
-      }
-
-      return parsedData.token === refreshToken && parsedData.userId === userId;
-    } catch (error) {
-      logger.error('Error validating refresh token:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Rotate refresh token (remove old, store new)
-   */
-  async rotateRefreshToken(
-    userId: string,
-    oldRefreshToken: string,
-    newRefreshToken: string
-  ): Promise<void> {
-    try {
-      const oldKey = `${this.REFRESH_TOKEN_PREFIX}${userId}:${oldRefreshToken}`;
-      const newKey = `${this.REFRESH_TOKEN_PREFIX}${userId}:${newRefreshToken}`;
-
-      // Remove old token
-      await this.redis.del(oldKey);
-
-      // Store new token
-      const tokenData: RefreshTokenData = {
-        token: newRefreshToken,
-        userId,
-        expiresAt: new Date(Date.now() + this.REFRESH_TOKEN_EXPIRY * 1000),
-        createdAt: new Date(),
-      };
-
-      await this.redis.setex(
-        newKey,
-        this.REFRESH_TOKEN_EXPIRY,
-        JSON.stringify(tokenData)
-      );
-
-      logger.info('Refresh token rotated', { userId });
-    } catch (error) {
-      logger.error('Error rotating refresh token:', error);
-      throw new Error('Failed to rotate refresh token');
-    }
-  }
-
-  /**
-   * Revoke a specific refresh token
-   */
-  async revokeRefreshToken(userId: string, refreshToken: string): Promise<void> {
-    try {
-      const key = `${this.REFRESH_TOKEN_PREFIX}${userId}:${refreshToken}`;
-      await this.redis.del(key);
-
-      logger.info('Refresh token revoked', { userId });
-    } catch (error) {
-      logger.error('Error revoking refresh token:', error);
-      throw new Error('Failed to revoke refresh token');
-    }
-  }
-
-  /**
-   * Revoke all refresh tokens for a user
-   */
-  async revokeAllRefreshTokens(userId: string): Promise<void> {
-    try {
-      const pattern = `${this.REFRESH_TOKEN_PREFIX}${userId}:*`;
-      const keys = await this.redis.keys(pattern);
-
-      if (keys.length > 0) {
-        await this.redis.del(...keys);
-      }
-
-      logger.info('All refresh tokens revoked', { userId, count: keys.length });
-    } catch (error) {
-      logger.error('Error revoking all refresh tokens:', error);
-      throw new Error('Failed to revoke refresh tokens');
-    }
-  }
-
-  /**
-   * Check rate limiting for authentication attempts
-   */
-  async checkRateLimit(
-    identifier: string, // IP address or user ID
-    action: string, // 'login', 'password_reset', etc.
-    maxAttempts: number = 5,
-    windowMs: number = 15 * 60 * 1000 // 15 minutes
-  ): Promise<{ allowed: boolean; remaining: number; resetTime: Date }> {
-    try {
-      const key = `${this.RATE_LIMIT_PREFIX}${action}:${identifier}`;
-      const current = await this.redis.get(key);
-
-      if (!current) {
-        // First attempt
-        await this.redis.setex(key, Math.ceil(windowMs / 1000), '1');
-        return {
-          allowed: true,
-          remaining: maxAttempts - 1,
-          resetTime: new Date(Date.now() + windowMs),
-        };
-      }
-
-      const attempts = parseInt(current);
-      
-      if (attempts >= maxAttempts) {
-        const ttl = await this.redis.ttl(key);
-        return {
-          allowed: false,
-          remaining: 0,
-          resetTime: new Date(Date.now() + ttl * 1000),
-        };
-      }
-
-      // Increment attempts
-      await this.redis.incr(key);
-      const ttl = await this.redis.ttl(key);
-
-      return {
-        allowed: true,
-        remaining: maxAttempts - attempts - 1,
-        resetTime: new Date(Date.now() + ttl * 1000),
-      };
-    } catch (error) {
-      logger.error('Error checking rate limit:', error);
-      // Allow request if rate limiting fails
-      return {
-        allowed: true,
-        remaining: maxAttempts,
-        resetTime: new Date(Date.now() + windowMs),
-      };
-    }
-  }
-
-  /**
-   * Reset rate limiting for an identifier
-   */
-  async resetRateLimit(identifier: string, action: string): Promise<void> {
-    try {
-      const key = `${this.RATE_LIMIT_PREFIX}${action}:${identifier}`;
-      await this.redis.del(key);
-
-      logger.info('Rate limit reset', { identifier, action });
-    } catch (error) {
-      logger.error('Error resetting rate limit:', error);
-    }
-  }
-
-  /**
-   * Get user sessions (active refresh tokens)
-   */
-  async getUserSessions(userId: string): Promise<RefreshTokenData[]> {
-    try {
-      const pattern = `${this.REFRESH_TOKEN_PREFIX}${userId}:*`;
-      const keys = await this.redis.keys(pattern);
-
-      if (keys.length === 0) {
-        return [];
-      }
-
-      const sessions: RefreshTokenData[] = [];
-
-      for (const key of keys) {
-        const tokenData = await this.redis.get(key);
-        if (tokenData) {
-          try {
-            const parsedData: RefreshTokenData = JSON.parse(tokenData);
-            
-            // Check if session is still valid
-            if (new Date() <= parsedData.expiresAt) {
-              sessions.push(parsedData);
-            } else {
-              // Clean up expired session
-              await this.redis.del(key);
+      // Create user with transaction
+      const result = await this.prisma.$transaction(async (tx) => {
+        // Create user
+        const user = await tx.user.create({
+          data: {
+            email: data.email.toLowerCase(),
+            passwordHash: hashedPassword,
+            firstName: data.firstName,
+            lastName: data.lastName,
+            role: 'USER',
+            emailVerificationToken,
+            emailVerificationExpires: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+            preferences: {
+              notifications: {
+                email: true,
+                push: true,
+                marketing: false
+              },
+              dashboard: {
+                theme: 'light',
+                timezone: 'UTC'
+              }
             }
-          } catch (parseError) {
-            logger.error('Error parsing session data:', parseError);
-            // Clean up corrupted data
-            await this.redis.del(key);
+          },
+          include: {
+            organizationMembers: {
+              include: {
+                organization: true
+              }
+            }
           }
+        });
+
+        // Create organization if provided
+        if (data.organizationName) {
+          const organization = await tx.organization.create({
+            data: {
+              name: data.organizationName,
+              ownerId: user.id,
+              members: {
+                create: {
+                  userId: user.id,
+                  role: 'OWNER'
+                }
+              }
+            }
+          });
+
+          logger.info(`Organization created: ${organization.name} for user: ${user.email}`);
         }
-      }
 
-      return sessions;
-    } catch (error) {
-      logger.error('Error getting user sessions:', error);
-      return [];
-    }
-  }
+        return user;
+      });
 
-  /**
-   * Clean up expired tokens
-   */
-  async cleanupExpiredTokens(): Promise<void> {
-    try {
-      const patterns = [
-        `${this.EMAIL_VERIFICATION_PREFIX}*`,
-        `${this.PASSWORD_RESET_PREFIX}*`,
-        `${this.REFRESH_TOKEN_PREFIX}*`,
-      ];
+      // Send verification email
+      await this.sendVerificationEmail(result.email, emailVerificationToken);
 
-      let cleanedCount = 0;
+      // Generate tokens
+      const tokens = await this.generateTokens(result.id);
 
-      for (const pattern of patterns) {
-        const keys = await this.redis.keys(pattern);
-        
-        for (const key of keys) {
-          const ttl = await this.redis.ttl(key);
-          
-          // If TTL is -1, the key exists but has no expiry
-          // If TTL is -2, the key doesn't exist
-          if (ttl === -1) {
-            await this.redis.del(key);
-            cleanedCount++;
-          }
-        }
-      }
+      // Update last login
+      await this.prisma.user.update({
+        where: { id: result.id },
+        data: { lastLoginAt: new Date() }
+      });
 
-      if (cleanedCount > 0) {
-        logger.info('Cleaned up expired tokens', { count: cleanedCount });
-      }
-    } catch (error) {
-      logger.error('Error cleaning up expired tokens:', error);
-    }
-  }
-
-  /**
-   * Get authentication statistics
-   */
-  async getAuthStats(): Promise<{
-    activeRefreshTokens: number;
-    pendingEmailVerifications: number;
-    pendingPasswordResets: number;
-  }> {
-    try {
-      const [refreshTokens, emailVerifications, passwordResets] = await Promise.all([
-        this.redis.keys(`${this.REFRESH_TOKEN_PREFIX}*`),
-        this.redis.keys(`${this.EMAIL_VERIFICATION_PREFIX}*`),
-        this.redis.keys(`${this.PASSWORD_RESET_PREFIX}*`),
-      ]);
+      logger.info(`User registered: ${result.email}`);
 
       return {
-        activeRefreshTokens: refreshTokens.length,
-        pendingEmailVerifications: emailVerifications.length,
-        pendingPasswordResets: passwordResets.length,
+        user: this.mapUserProfile(result),
+        tokens
       };
-    } catch (error) {
-      logger.error('Error getting auth stats:', error);
-      return {
-        activeRefreshTokens: 0,
-        pendingEmailVerifications: 0,
-        pendingPasswordResets: 0,
-      };
-    }
+    });
   }
 
   /**
-   * Create or update user session tracking
+   * Login user
    */
-  async trackUserSession(
-    userId: string,
-    sessionData: {
-      ip: string;
-      userAgent: string;
-      location?: string;
-    }
-  ): Promise<void> {
-    try {
-      const sessionKey = `user_session:${userId}`;
-      const sessionInfo = {
-        ...sessionData,
-        lastActivity: new Date().toISOString(),
-        loginCount: 1,
-      };
-
-      // Get existing session data
-      const existingSession = await this.redis.get(sessionKey);
-      if (existingSession) {
-        const parsed = JSON.parse(existingSession);
-        sessionInfo.loginCount = (parsed.loginCount || 0) + 1;
-      }
-
-      // Store session data for 7 days
-      await this.redis.setex(
-        sessionKey,
-        7 * 24 * 60 * 60,
-        JSON.stringify(sessionInfo)
-      );
-
-      logger.info('User session tracked', { userId });
-    } catch (error) {
-      logger.error('Error tracking user session:', error);
-    }
-  }
-
-  /**
-   * Get user session information
-   */
-  async getUserSessionInfo(userId: string): Promise<any> {
-    try {
-      const sessionKey = `user_session:${userId}`;
-      const sessionData = await this.redis.get(sessionKey);
-
-      if (!sessionData) {
-        return null;
-      }
-
-      return JSON.parse(sessionData);
-    } catch (error) {
-      logger.error('Error getting user session info:', error);
-      return null;
-    }
-  }
-
-  /**
-   * Validate user account status
-   */
-  async validateUserAccount(userId: string): Promise<{
-    isValid: boolean;
-    reason?: string;
-    user?: any;
-  }> {
-    try {
+  async login(credentials: LoginCredentials): Promise<{ user: UserProfile; tokens: AuthTokens }> {
+    return this.executeWithPolicy('login', async () => {
+      // Find user
       const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        select: {
-          id: true,
-          email: true,
-          isActive: true,
-          emailVerified: true,
-          role: true,
-          createdAt: true,
-          lastLoginAt: true,
-        },
+        where: { email: credentials.email.toLowerCase() },
+        include: {
+          organizationMembers: {
+            include: {
+              organization: true
+            }
+          }
+        }
       });
 
       if (!user) {
-        return { isValid: false, reason: 'User not found' };
+        throw new Error('Invalid email or password');
       }
 
-      if (!user.isActive) {
-        return { isValid: false, reason: 'Account is disabled' };
+      // Check if account is locked
+      if (user.accountLockedUntil && user.accountLockedUntil > new Date()) {
+        throw new Error('Account is temporarily locked due to multiple failed login attempts');
       }
 
-      return { isValid: true, user };
-    } catch (error) {
-      logger.error('Error validating user account:', error);
-      return { isValid: false, reason: 'Validation error' };
+      // Verify password
+      const isPasswordValid = await bcrypt.compare(credentials.password, user.passwordHash);
+
+      if (!isPasswordValid) {
+        // Increment failed login attempts
+        await this.handleFailedLogin(user.id);
+        throw new Error('Invalid email or password');
+      }
+
+      // Reset login attempts on successful login
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failedLoginAttempts: 0,
+          accountLockedUntil: null,
+          lastLoginAt: new Date()
+        }
+      });
+
+      // Generate tokens
+      const tokenExpiry = credentials.rememberMe ? '30d' : this.TOKEN_EXPIRY;
+      const tokens = await this.generateTokens(user.id, tokenExpiry);
+
+      logger.info(`User logged in: ${user.email}`);
+
+      return {
+        user: this.mapUserProfile(user),
+        tokens
+      };
+    });
+  }
+
+  /**
+   * Refresh access token
+   */
+  async refreshToken(refreshToken: string): Promise<AuthTokens> {
+    return this.executeWithPolicy('refresh_token', async () => {
+      try {
+        const payload = jwt.verify(refreshToken, this.JWT_REFRESH_SECRET) as any;
+        
+        // Check if user still exists
+        const user = await this.prisma.user.findUnique({
+          where: { id: payload.userId }
+        });
+
+        if (!user) {
+          throw new Error('User not found');
+        }
+
+        // Generate new tokens
+        return await this.generateTokens(user.id);
+
+      } catch (error) {
+        throw new Error('Invalid refresh token');
+      }
+    });
+  }
+
+  /**
+   * Logout user (invalidate tokens)
+   */
+  async logout(userId: string, refreshToken?: string): Promise<void> {
+    return this.executeWithPolicy('logout', async () => {
+      // In a production system, you would add the tokens to a blacklist
+      // For now, we'll just log the logout
+      logger.info(`User logged out: ${userId}`);
+      
+      // Update last activity
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { lastActivityAt: new Date() }
+      });
+    });
+  }
+
+  /**
+   * Verify email address
+   */
+  async verifyEmail(token: string): Promise<{ success: boolean; message: string }> {
+    return this.executeWithPolicy('verify_email', async () => {
+      const user = await this.prisma.user.findFirst({
+        where: {
+          emailVerificationToken: token,
+          emailVerificationExpires: {
+            gt: new Date()
+          }
+        }
+      });
+
+      if (!user) {
+        return { success: false, message: 'Invalid or expired verification token' };
+      }
+
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          isEmailVerified: true,
+          emailVerificationToken: null,
+          emailVerificationExpires: null
+        }
+      });
+
+      logger.info(`Email verified for user: ${user.email}`);
+
+      return { success: true, message: 'Email verified successfully' };
+    });
+  }
+
+  /**
+   * Request password reset
+   */
+  async requestPasswordReset(email: string): Promise<{ success: boolean; message: string }> {
+    return this.executeWithPolicy('request_password_reset', async () => {
+      const user = await this.prisma.user.findUnique({
+        where: { email: email.toLowerCase() }
+      });
+
+      if (!user) {
+        // Don't reveal if email exists
+        return { success: true, message: 'If the email exists, a reset link has been sent' };
+      }
+
+      const resetToken = crypto.randomBytes(32).toString('hex');
+      const resetExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          passwordResetToken: resetToken,
+          passwordResetExpires: resetExpires
+        }
+      });
+
+      // Send reset email
+      await this.sendPasswordResetEmail(user.email, resetToken);
+
+      logger.info(`Password reset requested for: ${user.email}`);
+
+      return { success: true, message: 'If the email exists, a reset link has been sent' };
+    });
+  }
+
+  /**
+   * Reset password
+   */
+  async resetPassword(data: ResetPasswordData): Promise<{ success: boolean; message: string }> {
+    return this.executeWithPolicy('reset_password', async () => {
+      const user = await this.prisma.user.findFirst({
+        where: {
+          passwordResetToken: data.token,
+          passwordResetExpires: {
+            gt: new Date()
+          }
+        }
+      });
+
+      if (!user) {
+        return { success: false, message: 'Invalid or expired reset token' };
+      }
+
+      const saltRounds = 12;
+      const hashedPassword = await bcrypt.hash(data.newPassword, saltRounds);
+
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash: hashedPassword,
+          passwordResetToken: null,
+          passwordResetExpires: null,
+          failedLoginAttempts: 0,
+          accountLockedUntil: null
+        }
+      });
+
+      logger.info(`Password reset completed for: ${user.email}`);
+
+      return { success: true, message: 'Password reset successfully' };
+    });
+  }
+
+  /**
+   * Get user profile
+   */
+  async getUserProfile(userId: string): Promise<UserProfile> {
+    return this.executeWithPolicy('get_profile', async () => {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        include: {
+          organizationMembers: {
+            include: {
+              organization: true
+            }
+          }
+        }
+      });
+
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      return this.mapUserProfile(user);
+    });
+  }
+
+  /**
+   * Update user profile
+   */
+  async updateProfile(userId: string, updates: Partial<UserProfile>): Promise<UserProfile> {
+    return this.executeWithPolicy('update_profile', async () => {
+      const updateData: any = {};
+
+      if (updates.firstName) updateData.firstName = updates.firstName;
+      if (updates.lastName) updateData.lastName = updates.lastName;
+      if (updates.avatar) updateData.avatar = updates.avatar;
+      if (updates.preferences) updateData.preferences = updates.preferences;
+
+      const user = await this.prisma.user.update({
+        where: { id: userId },
+        data: updateData,
+        include: {
+          organizationMembers: {
+            include: {
+              organization: true
+            }
+          }
+        }
+      });
+
+      logger.info(`Profile updated for user: ${user.email}`);
+
+      return this.mapUserProfile(user);
+    });
+  }
+
+  /**
+   * Change password
+   */
+  async changePassword(
+    userId: string, 
+    currentPassword: string, 
+    newPassword: string
+  ): Promise<{ success: boolean; message: string }> {
+    return this.executeWithPolicy('change_password', async () => {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId }
+      });
+
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      // Verify current password
+      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.passwordHash);
+      if (!isCurrentPasswordValid) {
+        return { success: false, message: 'Current password is incorrect' };
+      }
+
+      // Hash new password
+      const saltRounds = 12;
+      const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { passwordHash: hashedPassword }
+      });
+
+      logger.info(`Password changed for user: ${user.email}`);
+
+      return { success: true, message: 'Password changed successfully' };
+    });
+  }
+
+  /**
+   * Create API key
+   */
+  async createApiKey(userId: string, name: string, permissions?: any): Promise<ApiKey> {
+    return this.executeWithPolicy('create_api_key', async () => {
+      const key = crypto.randomBytes(32).toString('hex');
+      const hashedKey = await bcrypt.hash(key, 10);
+
+      const apiKey = await this.prisma.apiKey.create({
+        data: {
+          userId,
+          name,
+          key: hashedKey,
+          permissions
+        }
+      });
+
+      logger.info(`API key created for user: ${userId}`);
+
+      // Return the key with the actual value (only time it's shown)
+      return {
+        ...apiKey,
+        key // Return unhashed key for user to copy
+      } as ApiKey;
+    });
+  }
+
+  // Private helper methods
+
+  private async generateTokens(userId: string, accessTokenExpiry?: string): Promise<AuthTokens> {
+    const payload = { userId };
+    const expiry = accessTokenExpiry || this.TOKEN_EXPIRY;
+
+    const accessToken = jwt.sign(payload, this.JWT_SECRET, { expiresIn: expiry });
+    const refreshToken = jwt.sign(payload, this.JWT_REFRESH_SECRET, { 
+      expiresIn: this.REFRESH_TOKEN_EXPIRY 
+    });
+
+    // Calculate expiry time in seconds
+    const expiresIn = expiry === '30d' ? 30 * 24 * 60 * 60 : 15 * 60;
+
+    return {
+      accessToken,
+      refreshToken,
+      expiresIn
+    };
+  }
+
+  private async handleFailedLogin(userId: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId }
+    });
+
+    if (!user) return;
+
+    const attempts = (user.failedLoginAttempts || 0) + 1;
+    const lockUntil = attempts >= 5 ? new Date(Date.now() + 30 * 60 * 1000) : null; // 30 minutes
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        failedLoginAttempts: attempts,
+        accountLockedUntil: lockUntil
+      }
+    });
+
+    if (lockUntil) {
+      logger.warn(`Account locked for user: ${user.email} after ${attempts} failed attempts`);
     }
   }
-}
 
-export default AuthService;
+  private mapUserProfile(user: any): UserProfile {
+    return {
+      id: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      avatar: user.avatar,
+      role: user.role,
+      isEmailVerified: user.isEmailVerified,
+      lastLoginAt: user.lastLoginAt,
+      createdAt: user.createdAt,
+      preferences: user.preferences,
+      organizations: user.organizationMembers?.map((member: any) => ({
+        id: member.organization.id,
+        name: member.organization.name,
+        role: member.role
+      }))
+    };
+  }
+
+  private async sendVerificationEmail(email: string, token: string): Promise<void> {
+    const verificationUrl = `${process.env.FRONTEND_URL}/verify-email?token=${token}`;
+    
+    await sendEmail({
+      to: email,
+      subject: 'Verify your AdMetrics account',
+      template: 'email-verification',
+      context: {
+        verificationUrl
+      }
+    });
+  }
+
+  private async sendPasswordResetEmail(email: string, token: string): Promise<void> {
+    const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${token}`;
+    
+    await sendEmail({
+      to: email,
+      subject: 'Reset your AdMetrics password',
+      template: 'password-reset',
+      context: {
+        resetUrl
+      }
+    });
+  }
+}

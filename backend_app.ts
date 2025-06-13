@@ -1,331 +1,399 @@
-import express from 'express';
+// backend/src/app.ts
+import express, { Application, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
-import { PrismaClient } from '@prisma/client';
-import Redis from 'ioredis';
 import { createServer } from 'http';
-import { Server } from 'socket.io';
-import swaggerUi from 'swagger-ui-express';
+import { Server as SocketIOServer } from 'socket.io';
 import swaggerJsdoc from 'swagger-jsdoc';
+import swaggerUi from 'swagger-ui-express';
 
-// Middleware
-import { authMiddleware } from './middleware/auth.middleware';
-import { errorHandler } from './middleware/error.middleware';
-import { requestLogger } from './middleware/logger.middleware';
-import { rateLimitMiddleware } from './middleware/rate-limit.middleware';
+// Import configurations
+import { databaseManager } from './config/database';
+import { redisManager } from './config/redis';
+import { validateEnvironmentVariables } from './config/api-keys';
 
-// Routes
+// Import middleware
+import {
+  errorHandler,
+  notFoundHandler,
+  requestLogger,
+  securityHeaders,
+  healthCheck
+} from './middleware/error.middleware';
+import { addCorsHeaders } from './middleware/auth.middleware';
+
+// Import routes
 import authRoutes from './routes/auth.routes';
+import campaignRoutes from './routes/campaigns.routes';
+import metricRoutes from './routes/metrics.routes';
+import integrationRoutes from './routes/integrations.routes';
 import dashboardRoutes from './routes/dashboard.routes';
-import campaignsRoutes from './routes/campaigns.routes';
-import metricsRoutes from './routes/metrics.routes';
-import integrationsRoutes from './routes/integrations.routes';
-import reportsRoutes from './routes/reports.routes';
-import aiInsightsRoutes from './routes/ai-insights.routes';
+import reportRoutes from './routes/reports.routes';
+import userRoutes from './routes/users.routes';
+import adminRoutes from './routes/admin.routes';
 
-// Services
-import { WebSocketService } from './services/websocket.service';
+// Import services
 import { logger } from './utils/logger';
+import { verifyEmailConnection } from './utils/email';
 
-// Types
-import type { Application } from 'express';
+// Import WebSocket handlers
+import { setupWebSocketHandlers } from './websocket/handlers';
 
 class AdMetricsApp {
   public app: Application;
   public server: any;
-  public io: Server;
-  public prisma: PrismaClient;
-  public redis: Redis;
-  public websocketService: WebSocketService;
+  public io: SocketIOServer;
+  private port: number;
 
   constructor() {
     this.app = express();
-    this.server = createServer(this.app);
-    this.initializeDatabase();
-    this.initializeRedis();
-    this.initializeWebSocket();
-    this.initializeMiddleware();
+    this.port = parseInt(process.env.PORT || '3000');
+    
+    this.initializePreMiddleware();
     this.initializeRoutes();
-    this.initializeSwagger();
-    this.initializeErrorHandling();
+    this.initializePostMiddleware();
+    this.createServer();
   }
 
-  private initializeDatabase(): void {
-    this.prisma = new PrismaClient({
-      log: ['query', 'info', 'warn', 'error'],
-      errorFormat: 'pretty',
-    });
-
-    // Handle graceful shutdown
-    process.on('beforeExit', async () => {
-      await this.prisma.$disconnect();
-    });
-  }
-
-  private initializeRedis(): void {
-    this.redis = new Redis({
-      host: process.env.REDIS_HOST || 'localhost',
-      port: parseInt(process.env.REDIS_PORT || '6379'),
-      password: process.env.REDIS_PASSWORD,
-      retryDelayOnFailure: (times) => Math.min(times * 50, 2000),
-      maxRetriesPerRequest: 3,
-    });
-
-    this.redis.on('connect', () => {
-      logger.info('Redis connected successfully');
-    });
-
-    this.redis.on('error', (error) => {
-      logger.error('Redis connection error:', error);
-    });
-  }
-
-  private initializeWebSocket(): void {
-    this.io = new Server(this.server, {
-      cors: {
-        origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-        methods: ['GET', 'POST'],
-        credentials: true,
-      },
-      transports: ['websocket', 'polling'],
-    });
-
-    this.websocketService = new WebSocketService(this.io, this.prisma, this.redis);
-  }
-
-  private initializeMiddleware(): void {
+  private initializePreMiddleware(): void {
     // Security middleware
     this.app.use(helmet({
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
-          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-          fontSrc: ["'self'", 'https://fonts.gstatic.com'],
-          imgSrc: ["'self'", 'data:', 'https:'],
+          styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+          fontSrc: ["'self'", "https://fonts.gstatic.com"],
+          imgSrc: ["'self'", "data:", "https:"],
           scriptSrc: ["'self'"],
-        },
+          connectSrc: ["'self'", "ws:", "wss:"]
+        }
       },
+      crossOriginEmbedderPolicy: false
     }));
 
     // CORS configuration
     this.app.use(cors({
-      origin: [
-        process.env.FRONTEND_URL || 'http://localhost:3000',
-        'http://localhost:3001', // Development
-      ],
+      origin: this.getAllowedOrigins(),
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'x-request-id']
     }));
 
-    // Compression and parsing
+    // Additional CORS headers
+    this.app.use(addCorsHeaders);
+
+    // Security headers
+    this.app.use(securityHeaders);
+
+    // Compression
     this.app.use(compression());
+
+    // Rate limiting
+    this.app.use(rateLimit({
+      windowMs: 15 * 60 * 1000, // 15 minutes
+      max: 1000, // limit each IP to 1000 requests per windowMs
+      message: {
+        success: false,
+        message: 'Too many requests, please try again later',
+        code: 'RATE_LIMIT_EXCEEDED'
+      },
+      standardHeaders: true,
+      legacyHeaders: false,
+      skip: (req) => {
+        // Skip rate limiting for health checks
+        return req.path === '/health';
+      }
+    }));
+
+    // Body parsing
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
     // Request logging
     this.app.use(requestLogger);
 
-    // Global rate limiting
-    this.app.use(rateLimit({
-      windowMs: 15 * 60 * 1000, // 15 minutes
-      max: 1000, // Limit each IP to 1000 requests per windowMs
-      message: 'Too many requests from this IP, please try again later.',
-      standardHeaders: true,
-      legacyHeaders: false,
-    }));
-
-    // Health check
-    this.app.get('/health', (req, res) => {
-      res.status(200).json({
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-        environment: process.env.NODE_ENV,
-        version: process.env.npm_package_version || '1.0.0',
-      });
-    });
-
-    // API status
-    this.app.get('/api/status', async (req, res) => {
-      try {
-        // Check database connection
-        await this.prisma.$queryRaw`SELECT 1`;
-        
-        // Check Redis connection
-        await this.redis.ping();
-
-        res.status(200).json({
-          status: 'operational',
-          services: {
-            database: 'connected',
-            redis: 'connected',
-            websocket: 'active',
-          },
-          timestamp: new Date().toISOString(),
-        });
-      } catch (error) {
-        logger.error('Health check failed:', error);
-        res.status(503).json({
-          status: 'degraded',
-          error: 'Service health check failed',
-          timestamp: new Date().toISOString(),
-        });
-      }
-    });
+    // Trust proxy for accurate IP addresses
+    this.app.set('trust proxy', 1);
   }
 
   private initializeRoutes(): void {
-    const apiRouter = express.Router();
+    // Health check endpoint (before authentication)
+    this.app.get('/health', healthCheck);
+
+    // API documentation
+    this.setupSwagger();
 
     // API routes
+    const apiRouter = express.Router();
+    
+    // Authentication routes (public)
     apiRouter.use('/auth', authRoutes);
-    apiRouter.use('/dashboard', authMiddleware, dashboardRoutes);
-    apiRouter.use('/campaigns', authMiddleware, campaignsRoutes);
-    apiRouter.use('/metrics', authMiddleware, metricsRoutes);
-    apiRouter.use('/integrations', authMiddleware, integrationsRoutes);
-    apiRouter.use('/reports', authMiddleware, reportsRoutes);
-    apiRouter.use('/ai-insights', authMiddleware, aiInsightsRoutes);
+    
+    // Protected routes
+    apiRouter.use('/campaigns', campaignRoutes);
+    apiRouter.use('/metrics', metricRoutes);
+    apiRouter.use('/integrations', integrationRoutes);
+    apiRouter.use('/dashboard', dashboardRoutes);
+    apiRouter.use('/reports', reportRoutes);
+    apiRouter.use('/users', userRoutes);
+    apiRouter.use('/admin', adminRoutes);
 
-    // Mount API router
+    // Mount API routes
     this.app.use('/api', apiRouter);
 
-    // Catch-all route for undefined endpoints
-    this.app.use('/api/*', (req, res) => {
-      res.status(404).json({
-        success: false,
-        error: 'Endpoint not found',
-        path: req.originalUrl,
+    // API root endpoint
+    this.app.get('/api', (req: Request, res: Response) => {
+      res.json({
+        success: true,
+        message: 'AdMetrics API v1.0',
+        version: process.env.npm_package_version || '1.0.0',
+        documentation: '/api/docs',
+        status: 'operational',
+        timestamp: new Date().toISOString()
+      });
+    });
+
+    // Root endpoint
+    this.app.get('/', (req: Request, res: Response) => {
+      res.json({
+        success: true,
+        message: 'Welcome to AdMetrics AI Dashboard API',
+        version: process.env.npm_package_version || '1.0.0',
+        api: '/api',
+        documentation: '/api/docs',
+        health: '/health'
       });
     });
   }
 
-  private initializeSwagger(): void {
-    const swaggerOptions = {
+  private initializePostMiddleware(): void {
+    // 404 handler
+    this.app.use(notFoundHandler);
+
+    // Global error handler (must be last)
+    this.app.use(errorHandler);
+  }
+
+  private createServer(): void {
+    this.server = createServer(this.app);
+    
+    // Setup Socket.IO
+    this.io = new SocketIOServer(this.server, {
+      cors: {
+        origin: this.getAllowedOrigins(),
+        credentials: true
+      },
+      transports: ['websocket', 'polling']
+    });
+
+    // Setup WebSocket handlers
+    setupWebSocketHandlers(this.io);
+  }
+
+  private setupSwagger(): void {
+    const options = {
       definition: {
         openapi: '3.0.0',
         info: {
           title: 'AdMetrics AI Dashboard API',
-          version: '1.0.0',
-          description: 'API documentation for AdMetrics AI Dashboard',
+          version: process.env.npm_package_version || '1.0.0',
+          description: 'AI-powered advertising analytics and optimization platform',
           contact: {
-            name: 'AdMetrics Team',
-            email: 'dev@admetrics.ai',
+            name: 'AdMetrics Support',
+            email: 'support@admetrics.ai',
+            url: 'https://admetrics.ai'
           },
+          license: {
+            name: 'MIT',
+            url: 'https://opensource.org/licenses/MIT'
+          }
         },
         servers: [
           {
-            url: process.env.API_URL || 'http://localhost:3001',
-            description: 'Development server',
+            url: process.env.API_URL || `http://localhost:${this.port}`,
+            description: 'Development server'
           },
+          {
+            url: 'https://api.admetrics.ai',
+            description: 'Production server'
+          }
         ],
         components: {
           securitySchemes: {
             bearerAuth: {
               type: 'http',
               scheme: 'bearer',
-              bearerFormat: 'JWT',
+              bearerFormat: 'JWT'
             },
-          },
+            apiKey: {
+              type: 'apiKey',
+              in: 'header',
+              name: 'x-api-key'
+            }
+          }
         },
         security: [
-          {
-            bearerAuth: [],
-          },
-        ],
+          { bearerAuth: [] },
+          { apiKey: [] }
+        ]
       },
-      apis: ['./src/routes/*.ts', './src/controllers/*.ts'],
+      apis: [
+        './src/routes/*.ts',
+        './src/controllers/*.ts',
+        './src/types/*.ts'
+      ]
     };
 
-    const swaggerSpec = swaggerJsdoc(swaggerOptions);
+    const specs = swaggerJsdoc(options);
     
-    this.app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-      explorer: true,
+    this.app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(specs, {
       customCss: '.swagger-ui .topbar { display: none }',
       customSiteTitle: 'AdMetrics API Documentation',
+      swaggerOptions: {
+        persistAuthorization: true,
+        displayRequestDuration: true,
+        tryItOutEnabled: true
+      }
     }));
+
+    // JSON endpoint for API spec
+    this.app.get('/api/docs.json', (req: Request, res: Response) => {
+      res.json(specs);
+    });
   }
 
-  private initializeErrorHandling(): void {
-    // 404 handler
-    this.app.use('*', (req, res) => {
-      res.status(404).json({
-        success: false,
-        error: 'Resource not found',
-        path: req.originalUrl,
+  private getAllowedOrigins(): string[] {
+    const origins = process.env.ALLOWED_ORIGINS?.split(',') || [];
+    
+    // Default allowed origins
+    const defaultOrigins = [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://localhost:3002',
+      'https://app.admetrics.ai',
+      'https://staging.admetrics.ai'
+    ];
+
+    return [...defaultOrigins, ...origins].filter(Boolean);
+  }
+
+  public async start(): Promise<void> {
+    try {
+      // Validate environment variables
+      const envValidation = validateEnvironmentVariables();
+      if (!envValidation.isValid) {
+        logger.error('Missing required environment variables:', envValidation.missing);
+        process.exit(1);
+      }
+
+      if (envValidation.warnings.length > 0) {
+        logger.warn('Optional environment variables not set:', envValidation.warnings);
+      }
+
+      // Connect to database
+      await databaseManager.connect();
+
+      // Connect to Redis
+      await redisManager.connect();
+
+      // Verify email service (non-blocking)
+      verifyEmailConnection().catch(error => {
+        logger.warn('Email service verification failed:', error);
       });
-    });
 
-    // Global error handler
-    this.app.use(errorHandler);
+      // Start server
+      this.server.listen(this.port, () => {
+        logger.info(`🚀 AdMetrics API server started successfully`, {
+          port: this.port,
+          environment: process.env.NODE_ENV || 'development',
+          version: process.env.npm_package_version || '1.0.0',
+          pid: process.pid,
+          urls: {
+            api: `http://localhost:${this.port}/api`,
+            docs: `http://localhost:${this.port}/api/docs`,
+            health: `http://localhost:${this.port}/health`
+          }
+        });
+      });
 
-    // Unhandled promise rejections
-    process.on('unhandledRejection', (reason, promise) => {
-      logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    });
+      // Handle graceful shutdown
+      this.setupGracefulShutdown();
 
-    // Uncaught exceptions
-    process.on('uncaughtException', (error) => {
-      logger.error('Uncaught Exception:', error);
+    } catch (error) {
+      logger.error('Failed to start server:', error);
       process.exit(1);
-    });
+    }
   }
 
-  public listen(port: number): void {
-    this.server.listen(port, () => {
-      logger.info(`🚀 AdMetrics Backend running on port ${port}`);
-      logger.info(`📚 API Documentation: http://localhost:${port}/api-docs`);
-      logger.info(`🔗 WebSocket server ready`);
-      logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-    });
-  }
+  private setupGracefulShutdown(): void {
+    const gracefulShutdown = async (signal: string) => {
+      logger.info(`Received ${signal}, starting graceful shutdown...`);
 
-  public async gracefulShutdown(): Promise<void> {
-    logger.info('Starting graceful shutdown...');
-
-    return new Promise((resolve) => {
-      this.server.close(async () => {
+      // Close server
+      this.server.close(() => {
         logger.info('HTTP server closed');
+      });
 
-        // Close WebSocket connections
-        this.io.close();
+      // Close WebSocket connections
+      this.io.close(() => {
         logger.info('WebSocket server closed');
+      });
 
-        // Close database connection
-        await this.prisma.$disconnect();
-        logger.info('Database connection closed');
+      try {
+        // Close database connections
+        await databaseManager.disconnect();
+        logger.info('Database connections closed');
 
-        // Close Redis connection
-        this.redis.disconnect();
-        logger.info('Redis connection closed');
+        // Close Redis connections
+        await redisManager.disconnect();
+        logger.info('Redis connections closed');
 
         logger.info('Graceful shutdown completed');
-        resolve();
-      });
+        process.exit(0);
+      } catch (error) {
+        logger.error('Error during graceful shutdown:', error);
+        process.exit(1);
+      }
+    };
+
+    // Handle shutdown signals
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+    // Handle uncaught exceptions
+    process.on('uncaughtException', (error) => {
+      logger.error('Uncaught Exception:', error);
+      gracefulShutdown('uncaughtException');
     });
+
+    process.on('unhandledRejection', (reason, promise) => {
+      logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+      gracefulShutdown('unhandledRejection');
+    });
+  }
+
+  public getApp(): Application {
+    return this.app;
+  }
+
+  public getServer(): any {
+    return this.server;
+  }
+
+  public getIO(): SocketIOServer {
+    return this.io;
   }
 }
 
-// Initialize and start the application
-const app = new AdMetricsApp();
-const port = parseInt(process.env.PORT || '3001');
+// Create and export app instance
+const adMetricsApp = new AdMetricsApp();
 
-// Start server
-app.listen(port);
+// Start server if this file is run directly
+if (require.main === module) {
+  adMetricsApp.start();
+}
 
-// Graceful shutdown handlers
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received');
-  await app.gracefulShutdown();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received');
-  await app.gracefulShutdown();
-  process.exit(0);
-});
-
-export default app;
+export default adMetricsApp;
+export { AdMetricsApp };
