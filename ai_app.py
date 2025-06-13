@@ -1,49 +1,37 @@
 #!/usr/bin/env python3
 """
-AdMetrics AI Engine - Flask API for Machine Learning Models
-This service provides AI-powered insights and optimizations for advertising campaigns.
+AdMetrics AI Engine
+Flask API for AI-powered advertising analytics and optimization
 """
 
 import os
+import sys
 import logging
-import traceback
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, List, Any, Optional
 
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
-from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
-from werkzeug.exceptions import HTTPException
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import redis
 import psycopg2
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-import numpy as np
+from psycopg2.extras import RealDictCursor
 import pandas as pd
+import numpy as np
 
-# AI/ML imports
-from sklearn.ensemble import RandomForestRegressor, IsolationForest
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
-from prophet import Prophet
-import joblib
-import mlflow
-import mlflow.sklearn
+# Add project root to Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# Internal imports
 from src.models.prediction.performance_predictor import PerformancePredictor
-from src.models.prediction.budget_optimizer import BudgetOptimizer
-from src.models.prediction.anomaly_detector import AnomalyDetector
-from src.models.optimization.bid_optimizer import BidOptimizer
+from src.models.optimization.budget_optimizer import BudgetOptimizer
 from src.models.optimization.audience_segmenter import AudienceSegmenter
-from src.models.nlp.sentiment_analyzer import SentimentAnalyzer
+from src.models.prediction.anomaly_detector import AnomalyDetector
 from src.services.training_service import TrainingService
 from src.services.inference_service import InferenceService
-from src.services.feedback_service import FeedbackService
-from src.data.preprocessors import DataPreprocessor
 from src.utils.model_utils import ModelManager
-from src.utils.metrics import calculate_model_metrics
-from config import Config
+from src.utils.data_validator import DataValidator
+from src.utils.metrics_calculator import MetricsCalculator
 
 # Configure logging
 logging.basicConfig(
@@ -54,69 +42,94 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-app.config.from_object(Config)
+app.config.from_object('src.config.Config')
 
-# Configure CORS
-CORS(app, origins=['http://localhost:3001', 'https://dashboard.admetrics.ai'])
+# Enable CORS
+CORS(app, origins=[
+    "http://localhost:3001",  # Frontend development
+    "http://localhost:3000",  # Backend development
+    os.getenv('FRONTEND_URL', 'https://dashboard.admetrics.ai')
+])
 
-# Configure JWT
-jwt = JWTManager(app)
+# Initialize rate limiting
+limiter = Limiter(
+    app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"]
+)
 
-# Database connection
-engine = create_engine(app.config['DATABASE_URL'])
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Initialize Redis for caching
+redis_client = redis.Redis(
+    host=os.getenv('REDIS_HOST', 'localhost'),
+    port=int(os.getenv('REDIS_PORT', 6379)),
+    db=int(os.getenv('REDIS_DB', 1)),
+    decode_responses=True
+)
 
-# Redis connection
-redis_client = redis.Redis.from_url(app.config['REDIS_URL'])
-
-# MLflow setup
-mlflow.set_tracking_uri(app.config.get('MLFLOW_TRACKING_URI', 'sqlite:///mlflow.db'))
-mlflow.set_experiment('admetrics-ai-models')
+# Initialize database connection
+def get_db_connection():
+    """Get PostgreSQL database connection"""
+    try:
+        conn = psycopg2.connect(
+            host=os.getenv('DB_HOST', 'localhost'),
+            port=int(os.getenv('DB_PORT', 5432)),
+            database=os.getenv('DB_NAME', 'admetrics'),
+            user=os.getenv('DB_USER', 'postgres'),
+            password=os.getenv('DB_PASSWORD', 'postgres123'),
+            cursor_factory=RealDictCursor
+        )
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection failed: {e}")
+        raise
 
 # Initialize AI services
-model_manager = ModelManager(app.config['MODEL_PATH'])
-data_preprocessor = DataPreprocessor()
-training_service = TrainingService(model_manager, engine)
-inference_service = InferenceService(model_manager, redis_client)
-feedback_service = FeedbackService(engine, redis_client)
+model_manager = ModelManager()
+data_validator = DataValidator()
+metrics_calculator = MetricsCalculator()
 
-# Initialize AI models
+# Load trained models
 performance_predictor = PerformancePredictor()
 budget_optimizer = BudgetOptimizer()
-anomaly_detector = AnomalyDetector()
-bid_optimizer = BidOptimizer()
 audience_segmenter = AudienceSegmenter()
-sentiment_analyzer = SentimentAnalyzer()
+anomaly_detector = AnomalyDetector()
 
-# Global error handler
+# Initialize services
+training_service = TrainingService(model_manager)
+inference_service = InferenceService(model_manager, redis_client)
+
+# Middleware
+@app.before_request
+def before_request():
+    """Set up request context"""
+    g.start_time = datetime.utcnow()
+    g.user_id = request.headers.get('X-User-ID')
+    
+    # Log request
+    logger.info(f"Request: {request.method} {request.path} - User: {g.user_id}")
+
+@app.after_request
+def after_request(response):
+    """Log response and metrics"""
+    duration = (datetime.utcnow() - g.start_time).total_seconds()
+    logger.info(f"Response: {response.status_code} - Duration: {duration:.3f}s")
+    
+    # Add CORS headers
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-User-ID')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    
+    return response
+
 @app.errorhandler(Exception)
 def handle_exception(e):
     """Global exception handler"""
-    if isinstance(e, HTTPException):
-        return jsonify({
-            'success': False,
-            'error': e.description,
-            'code': e.code
-        }), e.code
-    
-    logger.error(f"Unhandled exception: {str(e)}\n{traceback.format_exc()}")
+    logger.error(f"Unhandled exception: {e}", exc_info=True)
     return jsonify({
         'success': False,
-        'error': 'Internal server error',
-        'message': str(e) if app.debug else 'An unexpected error occurred'
+        'error': 'INTERNAL_ERROR',
+        'message': 'An internal error occurred'
     }), 500
-
-# Database session management
-@app.before_request
-def create_db_session():
-    """Create database session for each request"""
-    g.db = SessionLocal()
-
-@app.teardown_request
-def close_db_session(exception):
-    """Close database session after each request"""
-    if hasattr(g, 'db'):
-        g.db.close()
 
 # Health check endpoint
 @app.route('/health', methods=['GET'])
@@ -124,444 +137,461 @@ def health_check():
     """Health check endpoint"""
     try:
         # Check database connection
-        with engine.connect() as conn:
-            conn.execute("SELECT 1")
-        
-        # Check Redis connection
+        conn = get_db_connection()
+        conn.close()
+        db_status = 'connected'
+    except:
+        db_status = 'disconnected'
+    
+    # Check Redis connection
+    try:
         redis_client.ping()
-        
-        # Check model availability
-        available_models = model_manager.list_available_models()
-        
-        return jsonify({
-            'status': 'healthy',
-            'timestamp': datetime.utcnow().isoformat(),
-            'services': {
-                'database': 'connected',
-                'redis': 'connected',
-                'models': len(available_models)
-            },
-            'available_models': available_models
-        })
-    except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
-        return jsonify({
-            'status': 'unhealthy',
-            'error': str(e)
-        }), 503
+        redis_status = 'connected'
+    except:
+        redis_status = 'disconnected'
+    
+    # Check model availability
+    models_status = {
+        'performance_predictor': performance_predictor.is_loaded(),
+        'budget_optimizer': budget_optimizer.is_loaded(),
+        'audience_segmenter': audience_segmenter.is_loaded(),
+        'anomaly_detector': anomaly_detector.is_loaded(),
+    }
+    
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.utcnow().isoformat(),
+        'version': '1.0.0',
+        'services': {
+            'database': db_status,
+            'redis': redis_status,
+            'models': models_status
+        }
+    })
 
 # Prediction endpoints
-@app.route('/api/v1/predictions/performance', methods=['POST'])
-@jwt_required()
+@app.route('/api/predict/performance', methods=['POST'])
+@limiter.limit("10 per minute")
 def predict_performance():
-    """Predict campaign performance metrics"""
+    """Predict campaign performance"""
     try:
         data = request.get_json()
-        user_id = get_jwt_identity()
         
         # Validate input data
-        required_fields = ['campaign_id', 'historical_data', 'prediction_days']
-        if not all(field in data for field in required_fields):
+        if not data_validator.validate_prediction_input(data):
             return jsonify({
                 'success': False,
-                'error': 'Missing required fields'
+                'error': 'VALIDATION_ERROR',
+                'message': 'Invalid input data'
             }), 400
         
-        # Process input data
-        historical_data = pd.DataFrame(data['historical_data'])
-        processed_data = data_preprocessor.prepare_time_series_data(historical_data)
+        # Extract parameters
+        campaign_id = data.get('campaign_id')
+        historical_data = data.get('historical_data', [])
+        prediction_days = data.get('prediction_days', 30)
+        metrics = data.get('metrics', ['spend', 'clicks', 'conversions'])
         
-        # Generate predictions
+        # Get historical data from database if not provided
+        if not historical_data and campaign_id:
+            historical_data = get_campaign_historical_data(campaign_id)
+        
+        # Make predictions
         predictions = performance_predictor.predict(
-            data=processed_data,
-            campaign_id=data['campaign_id'],
-            prediction_days=data['prediction_days']
+            historical_data=historical_data,
+            prediction_days=prediction_days,
+            metrics=metrics
         )
         
         # Calculate confidence intervals
-        confidence = performance_predictor.calculate_confidence_intervals(predictions)
+        confidence_intervals = performance_predictor.calculate_confidence_intervals(
+            predictions, confidence_level=0.95
+        )
         
         # Store predictions in cache
-        cache_key = f"predictions:performance:{user_id}:{data['campaign_id']}"
+        cache_key = f"predictions:{campaign_id}:{prediction_days}"
         redis_client.setex(
             cache_key, 
             3600,  # 1 hour cache
-            jsonify(predictions).data
+            str(predictions)
         )
         
         return jsonify({
             'success': True,
-            'predictions': predictions,
-            'confidence_intervals': confidence,
-            'generated_at': datetime.utcnow().isoformat()
+            'data': {
+                'predictions': predictions,
+                'confidence_intervals': confidence_intervals,
+                'prediction_days': prediction_days,
+                'metrics': metrics,
+                'generated_at': datetime.utcnow().isoformat()
+            }
         })
         
     except Exception as e:
-        logger.error(f"Performance prediction error: {str(e)}")
+        logger.error(f"Performance prediction error: {e}")
         return jsonify({
             'success': False,
-            'error': 'Failed to generate performance predictions'
+            'error': 'PREDICTION_ERROR',
+            'message': str(e)
         }), 500
 
-@app.route('/api/v1/optimization/budget', methods=['POST'])
-@jwt_required()
+@app.route('/api/optimize/budget', methods=['POST'])
+@limiter.limit("5 per minute")
 def optimize_budget():
     """Optimize budget allocation across campaigns"""
     try:
         data = request.get_json()
-        user_id = get_jwt_identity()
         
         # Validate input
-        required_fields = ['campaigns', 'total_budget', 'optimization_goal']
-        if not all(field in data for field in required_fields):
+        if not data_validator.validate_optimization_input(data):
             return jsonify({
                 'success': False,
-                'error': 'Missing required fields'
+                'error': 'VALIDATION_ERROR',
+                'message': 'Invalid optimization data'
             }), 400
         
-        # Prepare campaign data
-        campaigns_df = pd.DataFrame(data['campaigns'])
-        processed_campaigns = data_preprocessor.prepare_optimization_data(campaigns_df)
+        campaigns = data.get('campaigns', [])
+        total_budget = data.get('total_budget')
+        objective = data.get('objective', 'maximize_conversions')
+        constraints = data.get('constraints', {})
         
         # Perform budget optimization
         optimization_result = budget_optimizer.optimize(
-            campaigns=processed_campaigns,
-            total_budget=data['total_budget'],
-            goal=data['optimization_goal'],
-            constraints=data.get('constraints', {})
+            campaigns=campaigns,
+            total_budget=total_budget,
+            objective=objective,
+            constraints=constraints
         )
         
         # Calculate expected impact
-        impact_analysis = budget_optimizer.calculate_impact(
-            current_allocation=campaigns_df['current_budget'].tolist(),
-            optimized_allocation=optimization_result['allocations']
+        expected_impact = budget_optimizer.calculate_expected_impact(
+            optimization_result
         )
         
         return jsonify({
             'success': True,
-            'optimized_allocation': optimization_result,
-            'impact_analysis': impact_analysis,
-            'optimization_score': optimization_result.get('score', 0),
-            'generated_at': datetime.utcnow().isoformat()
+            'data': {
+                'optimization': optimization_result,
+                'expected_impact': expected_impact,
+                'objective': objective,
+                'total_budget': total_budget,
+                'optimized_at': datetime.utcnow().isoformat()
+            }
         })
         
     except Exception as e:
-        logger.error(f"Budget optimization error: {str(e)}")
+        logger.error(f"Budget optimization error: {e}")
         return jsonify({
             'success': False,
-            'error': 'Failed to optimize budget allocation'
+            'error': 'OPTIMIZATION_ERROR',
+            'message': str(e)
         }), 500
 
-@app.route('/api/v1/anomalies/detect', methods=['POST'])
-@jwt_required()
+@app.route('/api/analyze/anomalies', methods=['POST'])
+@limiter.limit("20 per minute")
 def detect_anomalies():
-    """Detect anomalies in campaign performance"""
+    """Detect anomalies in campaign metrics"""
     try:
         data = request.get_json()
-        user_id = get_jwt_identity()
         
-        # Validate input
-        if 'metrics_data' not in data:
-            return jsonify({
-                'success': False,
-                'error': 'Missing metrics_data field'
-            }), 400
+        campaign_ids = data.get('campaign_ids', [])
+        metrics = data.get('metrics', ['spend', 'clicks', 'conversions'])
+        sensitivity = data.get('sensitivity', 'medium')
         
-        # Process metrics data
-        metrics_df = pd.DataFrame(data['metrics_data'])
-        processed_metrics = data_preprocessor.prepare_anomaly_detection_data(metrics_df)
+        anomalies = []
         
-        # Detect anomalies
-        anomalies = anomaly_detector.detect(
-            data=processed_metrics,
-            sensitivity=data.get('sensitivity', 0.1),
-            method=data.get('method', 'isolation_forest')
-        )
+        for campaign_id in campaign_ids:
+            # Get recent metrics data
+            metrics_data = get_campaign_metrics(campaign_id, days=30)
+            
+            # Detect anomalies
+            campaign_anomalies = anomaly_detector.detect(
+                data=metrics_data,
+                metrics=metrics,
+                sensitivity=sensitivity
+            )
+            
+            # Add campaign context
+            for anomaly in campaign_anomalies:
+                anomaly['campaign_id'] = campaign_id
+                anomalies.append(anomaly)
         
-        # Generate explanations for anomalies
-        explanations = anomaly_detector.explain_anomalies(
-            data=processed_metrics,
-            anomalies=anomalies
+        # Rank anomalies by severity
+        ranked_anomalies = sorted(
+            anomalies, 
+            key=lambda x: x.get('severity_score', 0), 
+            reverse=True
         )
         
         return jsonify({
             'success': True,
-            'anomalies': anomalies,
-            'explanations': explanations,
-            'total_anomalies': len(anomalies),
-            'detection_method': data.get('method', 'isolation_forest'),
-            'generated_at': datetime.utcnow().isoformat()
+            'data': {
+                'anomalies': ranked_anomalies[:50],  # Limit to top 50
+                'total_found': len(anomalies),
+                'sensitivity': sensitivity,
+                'analyzed_at': datetime.utcnow().isoformat()
+            }
         })
         
     except Exception as e:
-        logger.error(f"Anomaly detection error: {str(e)}")
+        logger.error(f"Anomaly detection error: {e}")
         return jsonify({
             'success': False,
-            'error': 'Failed to detect anomalies'
+            'error': 'ANOMALY_DETECTION_ERROR',
+            'message': str(e)
         }), 500
 
-@app.route('/api/v1/optimization/bids', methods=['POST'])
-@jwt_required()
-def optimize_bids():
-    """Optimize bid strategies for campaigns"""
-    try:
-        data = request.get_json()
-        user_id = get_jwt_identity()
-        
-        # Validate input
-        required_fields = ['campaign_data', 'platform', 'objective']
-        if not all(field in data for field in required_fields):
-            return jsonify({
-                'success': False,
-                'error': 'Missing required fields'
-            }), 400
-        
-        # Process campaign data
-        campaign_df = pd.DataFrame(data['campaign_data'])
-        processed_data = data_preprocessor.prepare_bid_optimization_data(campaign_df)
-        
-        # Optimize bids
-        bid_recommendations = bid_optimizer.optimize(
-            data=processed_data,
-            platform=data['platform'],
-            objective=data['objective'],
-            constraints=data.get('constraints', {})
-        )
-        
-        # Calculate expected performance improvement
-        performance_impact = bid_optimizer.estimate_performance_impact(
-            current_bids=campaign_df['current_bid'].tolist(),
-            recommended_bids=bid_recommendations['bids']
-        )
-        
-        return jsonify({
-            'success': True,
-            'bid_recommendations': bid_recommendations,
-            'performance_impact': performance_impact,
-            'optimization_strategy': bid_recommendations.get('strategy'),
-            'generated_at': datetime.utcnow().isoformat()
-        })
-        
-    except Exception as e:
-        logger.error(f"Bid optimization error: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': 'Failed to optimize bids'
-        }), 500
-
-@app.route('/api/v1/segmentation/audience', methods=['POST'])
-@jwt_required()
+@app.route('/api/segment/audience', methods=['POST'])
+@limiter.limit("5 per minute")
 def segment_audience():
-    """Perform intelligent audience segmentation"""
+    """Segment audience for better targeting"""
     try:
         data = request.get_json()
-        user_id = get_jwt_identity()
         
-        # Validate input
-        if 'audience_data' not in data:
+        campaign_id = data.get('campaign_id')
+        segmentation_method = data.get('method', 'behavioral')
+        num_segments = data.get('num_segments', 5)
+        
+        # Get audience data
+        audience_data = get_audience_data(campaign_id)
+        
+        if not audience_data:
             return jsonify({
                 'success': False,
-                'error': 'Missing audience_data field'
+                'error': 'NO_DATA',
+                'message': 'No audience data available for segmentation'
             }), 400
-        
-        # Process audience data
-        audience_df = pd.DataFrame(data['audience_data'])
-        processed_data = data_preprocessor.prepare_segmentation_data(audience_df)
         
         # Perform segmentation
         segments = audience_segmenter.segment(
-            data=processed_data,
-            n_segments=data.get('n_segments', 5),
-            method=data.get('method', 'kmeans')
+            data=audience_data,
+            method=segmentation_method,
+            num_segments=num_segments
         )
         
-        # Generate segment profiles
-        segment_profiles = audience_segmenter.generate_profiles(
-            data=processed_data,
-            segments=segments
-        )
+        # Calculate segment characteristics
+        segment_analysis = audience_segmenter.analyze_segments(segments)
         
-        # Calculate segment performance insights
-        insights = audience_segmenter.analyze_segment_performance(
-            segments=segments,
-            performance_data=data.get('performance_data', {})
+        return jsonify({
+            'success': True,
+            'data': {
+                'segments': segments,
+                'analysis': segment_analysis,
+                'method': segmentation_method,
+                'campaign_id': campaign_id,
+                'segmented_at': datetime.utcnow().isoformat()
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Audience segmentation error: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'SEGMENTATION_ERROR',
+            'message': str(e)
+        }), 500
+
+@app.route('/api/insights/generate', methods=['POST'])
+@limiter.limit("10 per minute")
+def generate_insights():
+    """Generate AI insights for campaigns"""
+    try:
+        data = request.get_json()
+        
+        campaign_ids = data.get('campaign_ids', [])
+        insight_types = data.get('types', ['performance', 'optimization', 'anomalies'])
+        
+        insights = []
+        
+        for campaign_id in campaign_ids:
+            campaign_insights = inference_service.generate_insights(
+                campaign_id=campaign_id,
+                insight_types=insight_types
+            )
+            insights.extend(campaign_insights)
+        
+        # Rank insights by importance
+        ranked_insights = sorted(
+            insights,
+            key=lambda x: x.get('importance_score', 0),
+            reverse=True
         )
         
         return jsonify({
             'success': True,
-            'segments': segments,
-            'segment_profiles': segment_profiles,
-            'insights': insights,
-            'segmentation_method': data.get('method', 'kmeans'),
-            'generated_at': datetime.utcnow().isoformat()
+            'data': {
+                'insights': ranked_insights,
+                'total_generated': len(insights),
+                'insight_types': insight_types,
+                'generated_at': datetime.utcnow().isoformat()
+            }
         })
         
     except Exception as e:
-        logger.error(f"Audience segmentation error: {str(e)}")
+        logger.error(f"Insight generation error: {e}")
         return jsonify({
             'success': False,
-            'error': 'Failed to perform audience segmentation'
+            'error': 'INSIGHT_GENERATION_ERROR',
+            'message': str(e)
         }), 500
 
-@app.route('/api/v1/sentiment/analyze', methods=['POST'])
-@jwt_required()
-def analyze_sentiment():
-    """Analyze sentiment of ad comments and interactions"""
+# Model management endpoints
+@app.route('/api/models/train', methods=['POST'])
+@limiter.limit("1 per hour")
+def train_models():
+    """Trigger model training"""
     try:
         data = request.get_json()
-        user_id = get_jwt_identity()
         
-        # Validate input
-        if 'text_data' not in data:
-            return jsonify({
-                'success': False,
-                'error': 'Missing text_data field'
-            }), 400
+        model_types = data.get('model_types', ['performance_predictor'])
+        training_data_days = data.get('training_data_days', 90)
         
-        # Analyze sentiment
-        sentiment_results = sentiment_analyzer.analyze_bulk(
-            texts=data['text_data'],
-            language=data.get('language', 'en')
-        )
-        
-        # Generate sentiment summary
-        summary = sentiment_analyzer.generate_summary(sentiment_results)
-        
-        # Extract insights and trends
-        insights = sentiment_analyzer.extract_insights(
-            sentiment_results,
-            campaign_data=data.get('campaign_data', {})
-        )
-        
-        return jsonify({
-            'success': True,
-            'sentiment_results': sentiment_results,
-            'summary': summary,
-            'insights': insights,
-            'total_analyzed': len(data['text_data']),
-            'generated_at': datetime.utcnow().isoformat()
-        })
-        
-    except Exception as e:
-        logger.error(f"Sentiment analysis error: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': 'Failed to analyze sentiment'
-        }), 500
-
-# Model training endpoints
-@app.route('/api/v1/models/train', methods=['POST'])
-@jwt_required()
-def train_model():
-    """Train or retrain AI models with new data"""
-    try:
-        data = request.get_json()
-        user_id = get_jwt_identity()
-        
-        # Validate input
-        required_fields = ['model_type', 'training_data']
-        if not all(field in data for field in required_fields):
-            return jsonify({
-                'success': False,
-                'error': 'Missing required fields'
-            }), 400
-        
-        # Start model training
+        # Start training process
         training_job = training_service.start_training(
-            model_type=data['model_type'],
-            training_data=data['training_data'],
-            user_id=user_id,
-            config=data.get('config', {})
+            model_types=model_types,
+            training_data_days=training_data_days
         )
         
         return jsonify({
             'success': True,
-            'training_job_id': training_job['job_id'],
-            'estimated_duration': training_job['estimated_duration'],
-            'status': 'started'
+            'data': {
+                'job_id': training_job['id'],
+                'status': 'started',
+                'model_types': model_types,
+                'started_at': datetime.utcnow().isoformat()
+            }
         })
         
     except Exception as e:
-        logger.error(f"Model training error: {str(e)}")
+        logger.error(f"Model training error: {e}")
         return jsonify({
             'success': False,
-            'error': 'Failed to start model training'
+            'error': 'TRAINING_ERROR',
+            'message': str(e)
         }), 500
 
-@app.route('/api/v1/models/status/<job_id>', methods=['GET'])
-@jwt_required()
-def get_training_status(job_id):
-    """Get training job status"""
+@app.route('/api/models/status', methods=['GET'])
+def get_model_status():
+    """Get status of all models"""
     try:
-        status = training_service.get_training_status(job_id)
+        status = {
+            'performance_predictor': {
+                'loaded': performance_predictor.is_loaded(),
+                'version': performance_predictor.get_version(),
+                'last_trained': performance_predictor.get_last_trained_date(),
+                'accuracy': performance_predictor.get_accuracy_metrics()
+            },
+            'budget_optimizer': {
+                'loaded': budget_optimizer.is_loaded(),
+                'version': budget_optimizer.get_version(),
+                'last_trained': budget_optimizer.get_last_trained_date()
+            },
+            'audience_segmenter': {
+                'loaded': audience_segmenter.is_loaded(),
+                'version': audience_segmenter.get_version(),
+                'last_trained': audience_segmenter.get_last_trained_date()
+            },
+            'anomaly_detector': {
+                'loaded': anomaly_detector.is_loaded(),
+                'version': anomaly_detector.get_version(),
+                'last_trained': anomaly_detector.get_last_trained_date()
+            }
+        }
+        
         return jsonify({
             'success': True,
-            'status': status
+            'data': status
         })
+        
     except Exception as e:
-        logger.error(f"Training status error: {str(e)}")
+        logger.error(f"Model status error: {e}")
         return jsonify({
             'success': False,
-            'error': 'Failed to get training status'
+            'error': 'STATUS_ERROR',
+            'message': str(e)
         }), 500
 
-# Feedback endpoint for continuous learning
-@app.route('/api/v1/feedback', methods=['POST'])
-@jwt_required()
-def submit_feedback():
-    """Submit feedback on AI recommendations"""
+# Helper functions
+def get_campaign_historical_data(campaign_id: str, days: int = 90) -> List[Dict]:
+    """Get historical data for a campaign"""
     try:
-        data = request.get_json()
-        user_id = get_jwt_identity()
+        conn = get_db_connection()
+        cursor = conn.cursor()
         
-        # Process feedback
-        feedback_service.process_feedback(
-            user_id=user_id,
-            feedback_data=data
-        )
+        query = """
+        SELECT date, spend, clicks, impressions, conversions, ctr, cpc, roas
+        FROM metrics 
+        WHERE campaign_id = %s 
+        AND date >= %s 
+        ORDER BY date ASC
+        """
         
-        return jsonify({
-            'success': True,
-            'message': 'Feedback received and processed'
-        })
+        start_date = datetime.utcnow() - timedelta(days=days)
+        cursor.execute(query, (campaign_id, start_date))
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        return [dict(row) for row in results]
         
     except Exception as e:
-        logger.error(f"Feedback processing error: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': 'Failed to process feedback'
-        }), 500
+        logger.error(f"Error fetching historical data: {e}")
+        return []
 
-# Model information endpoints
-@app.route('/api/v1/models/info', methods=['GET'])
-@jwt_required()
-def get_models_info():
-    """Get information about available models"""
+def get_campaign_metrics(campaign_id: str, days: int = 30) -> List[Dict]:
+    """Get recent metrics for a campaign"""
     try:
-        models_info = model_manager.get_models_info()
-        return jsonify({
-            'success': True,
-            'models': models_info
-        })
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        query = """
+        SELECT * FROM metrics 
+        WHERE campaign_id = %s 
+        AND date >= %s 
+        ORDER BY date DESC
+        """
+        
+        start_date = datetime.utcnow() - timedelta(days=days)
+        cursor.execute(query, (campaign_id, start_date))
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        return [dict(row) for row in results]
+        
     except Exception as e:
-        logger.error(f"Models info error: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': 'Failed to get models information'
-        }), 500
+        logger.error(f"Error fetching campaign metrics: {e}")
+        return []
+
+def get_audience_data(campaign_id: str) -> Optional[Dict]:
+    """Get audience data for segmentation"""
+    try:
+        # This would typically fetch from your audience data store
+        # For now, return mock data structure
+        return {
+            'demographics': {},
+            'behavioral_data': {},
+            'interaction_history': [],
+            'conversion_data': []
+        }
+    except Exception as e:
+        logger.error(f"Error fetching audience data: {e}")
+        return None
 
 if __name__ == '__main__':
     # Load models on startup
     try:
         logger.info("Loading AI models...")
-        model_manager.load_all_models()
-        logger.info("AI models loaded successfully")
+        performance_predictor.load_model()
+        budget_optimizer.load_model()
+        audience_segmenter.load_model()
+        anomaly_detector.load_model()
+        logger.info("All models loaded successfully")
     except Exception as e:
-        logger.error(f"Failed to load models: {str(e)}")
+        logger.warning(f"Some models failed to load: {e}")
     
-    # Start Flask application
-    app.run(
-        host='0.0.0.0',
-        port=int(os.environ.get('PORT', 5000)),
-        debug=os.environ.get('FLASK_ENV') == 'development'
-    )
+    # Start Flask app
+    port = int(os.getenv('PORT', 5000))
+    debug = os.getenv('FLASK_ENV') == 'development'
+    
+    logger.info(f"Starting AdMetrics AI Engine on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=debug)

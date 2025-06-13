@@ -1,33 +1,29 @@
-// frontend/src/components/charts/PerformanceChart.tsx
-import React, { useState, useMemo } from 'react';
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
+import React, { useMemo, useState } from 'react';
+import { 
+  LineChart, 
+  Line, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  Legend, 
   ResponsiveContainer,
-  AreaChart,
-  Area,
-  BarChart,
-  Bar,
-  ReferenceLine
+  ReferenceLine,
+  Brush
 } from 'recharts';
 import { motion } from 'framer-motion';
 import {
-  ChartBarIcon,
-  ChartLineIcon,
-  ArrowTrendingUpIcon,
-  ArrowTrendingDownIcon,
   EyeIcon,
-  EyeSlashIcon
+  CalendarIcon,
+  ChartBarIcon,
+  ArrowsPointingOutIcon,
 } from '@heroicons/react/24/outline';
 import { formatCurrency, formatNumber, formatPercentage } from '../../utils/formatters';
+import clsx from 'clsx';
 
-interface ChartDataPoint {
+interface DataPoint {
   date: string;
+  timestamp: number;
   spend?: number;
   clicks?: number;
   impressions?: number;
@@ -35,450 +31,390 @@ interface ChartDataPoint {
   ctr?: number;
   cpc?: number;
   roas?: number;
-  revenue?: number;
+  cpl?: number;
+}
+
+interface MetricConfig {
+  key: string;
+  label: string;
+  color: string;
+  format: 'currency' | 'number' | 'percentage';
+  yAxisId?: 'left' | 'right';
+  strokeWidth?: number;
+  strokeDasharray?: string;
 }
 
 interface PerformanceChartProps {
-  data: ChartDataPoint[];
-  loading?: boolean;
+  data: DataPoint[];
+  metrics: string[];
+  title?: string;
   height?: number;
+  loading?: boolean;
+  showBrush?: boolean;
   showLegend?: boolean;
   showGrid?: boolean;
   showTooltip?: boolean;
-  chartType?: 'line' | 'area' | 'bar';
-  metrics?: string[];
-  colors?: string[];
+  timeRange?: 'day' | 'week' | 'month';
+  onDataPointClick?: (data: DataPoint) => void;
   className?: string;
-  onDataPointClick?: (data: ChartDataPoint) => void;
 }
 
-const defaultMetrics = ['spend', 'clicks', 'conversions'];
-const defaultColors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#F97316'];
-
-const metricConfig = {
-  spend: {
-    label: 'Spend',
-    color: '#3B82F6',
-    yAxisId: 'currency',
-    formatter: (value: number) => formatCurrency(value),
-    strokeWidth: 2
-  },
-  clicks: {
-    label: 'Clicks',
-    color: '#10B981',
-    yAxisId: 'count',
-    formatter: (value: number) => formatNumber(value),
-    strokeWidth: 2
-  },
-  impressions: {
-    label: 'Impressions',
-    color: '#F59E0B',
-    yAxisId: 'count',
-    formatter: (value: number) => formatNumber(value),
-    strokeWidth: 2
-  },
-  conversions: {
-    label: 'Conversions',
-    color: '#EF4444',
-    yAxisId: 'count',
-    formatter: (value: number) => formatNumber(value),
-    strokeWidth: 2
-  },
-  ctr: {
-    label: 'CTR',
-    color: '#8B5CF6',
-    yAxisId: 'percentage',
-    formatter: (value: number) => formatPercentage(value),
-    strokeWidth: 2
-  },
-  cpc: {
-    label: 'CPC',
-    color: '#F97316',
-    yAxisId: 'currency',
-    formatter: (value: number) => formatCurrency(value),
-    strokeWidth: 2
-  },
-  roas: {
-    label: 'ROAS',
-    color: '#06B6D4',
-    yAxisId: 'ratio',
-    formatter: (value: number) => `${value.toFixed(2)}x`,
-    strokeWidth: 2
-  },
-  revenue: {
-    label: 'Revenue',
-    color: '#84CC16',
-    yAxisId: 'currency',
-    formatter: (value: number) => formatCurrency(value),
-    strokeWidth: 2
-  }
-};
-
-export const PerformanceChart: React.FC<PerformanceChartProps> = ({
-  data = [],
+const PerformanceChart: React.FC<PerformanceChartProps> = ({
+  data,
+  metrics,
+  title = 'Performance Overview',
+  height = 400,
   loading = false,
-  height = 300,
+  showBrush = true,
   showLegend = true,
   showGrid = true,
   showTooltip = true,
-  chartType = 'line',
-  metrics = defaultMetrics,
-  colors = defaultColors,
-  className = '',
-  onDataPointClick
+  timeRange = 'day',
+  onDataPointClick,
+  className,
 }) => {
-  const [visibleMetrics, setVisibleMetrics] = useState<Set<string>>(new Set(metrics));
-  const [hoveredMetric, setHoveredMetric] = useState<string | null>(null);
+  const [activeMetrics, setActiveMetrics] = useState<string[]>(metrics);
+  const [focusedLine, setFocusedLine] = useState<string | null>(null);
 
-  // Process and format data
+  // Metric configurations
+  const metricConfigs: Record<string, MetricConfig> = {
+    spend: {
+      key: 'spend',
+      label: 'Spend',
+      color: '#3B82F6',
+      format: 'currency',
+      yAxisId: 'left',
+      strokeWidth: 3,
+    },
+    clicks: {
+      key: 'clicks',
+      label: 'Clicks',
+      color: '#10B981',
+      format: 'number',
+      yAxisId: 'right',
+      strokeWidth: 2,
+    },
+    impressions: {
+      key: 'impressions',
+      label: 'Impressions',
+      color: '#8B5CF6',
+      format: 'number',
+      yAxisId: 'right',
+      strokeWidth: 2,
+      strokeDasharray: '5 5',
+    },
+    conversions: {
+      key: 'conversions',
+      label: 'Conversions',
+      color: '#F59E0B',
+      format: 'number',
+      yAxisId: 'right',
+      strokeWidth: 3,
+    },
+    ctr: {
+      key: 'ctr',
+      label: 'CTR',
+      color: '#EF4444',
+      format: 'percentage',
+      yAxisId: 'right',
+      strokeWidth: 2,
+    },
+    cpc: {
+      key: 'cpc',
+      label: 'CPC',
+      color: '#6366F1',
+      format: 'currency',
+      yAxisId: 'left',
+      strokeWidth: 2,
+    },
+    roas: {
+      key: 'roas',
+      label: 'ROAS',
+      color: '#EC4899',
+      format: 'number',
+      yAxisId: 'right',
+      strokeWidth: 3,
+    },
+    cpl: {
+      key: 'cpl',
+      label: 'CPL',
+      color: '#14B8A6',
+      format: 'currency',
+      yAxisId: 'left',
+      strokeWidth: 2,
+    },
+  };
+
+  // Process data for chart
   const chartData = useMemo(() => {
     return data.map(point => ({
       ...point,
-      date: new Date(point.date).toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric'
-      })
+      formattedDate: formatDateForDisplay(point.date, timeRange),
     }));
-  }, [data]);
+  }, [data, timeRange]);
 
-  // Calculate trend for each metric
-  const trends = useMemo(() => {
-    const trends: Record<string, { direction: 'up' | 'down' | 'stable'; percentage: number }> = {};
-    
-    metrics.forEach(metric => {
-      const values = data.map(d => d[metric as keyof ChartDataPoint] as number).filter(v => v !== undefined);
-      if (values.length < 2) {
-        trends[metric] = { direction: 'stable', percentage: 0 };
-        return;
-      }
-      
-      const first = values[0];
-      const last = values[values.length - 1];
-      const change = ((last - first) / first) * 100;
-      
-      trends[metric] = {
-        direction: change > 5 ? 'up' : change < -5 ? 'down' : 'stable',
-        percentage: Math.abs(change)
-      };
-    });
-    
-    return trends;
-  }, [data, metrics]);
+  // Get active metric configs
+  const activeMetricConfigs = useMemo(() => {
+    return activeMetrics
+      .filter(metric => metricConfigs[metric])
+      .map(metric => metricConfigs[metric]);
+  }, [activeMetrics]);
 
-  // Toggle metric visibility
-  const toggleMetric = (metric: string) => {
-    const newVisible = new Set(visibleMetrics);
-    if (newVisible.has(metric)) {
-      newVisible.delete(metric);
-    } else {
-      newVisible.add(metric);
-    }
-    setVisibleMetrics(newVisible);
-  };
+  // Check if we need dual y-axis
+  const needsDualAxis = useMemo(() => {
+    const leftAxisMetrics = activeMetricConfigs.filter(config => config.yAxisId === 'left');
+    const rightAxisMetrics = activeMetricConfigs.filter(config => config.yAxisId === 'right');
+    return leftAxisMetrics.length > 0 && rightAxisMetrics.length > 0;
+  }, [activeMetricConfigs]);
 
   // Custom tooltip
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload || !payload.length) return null;
 
     return (
-      <div className="bg-white p-3 border border-gray-200 rounded-lg shadow-lg">
-        <p className="font-medium text-gray-900 mb-2">{label}</p>
-        {payload.map((entry: any, index: number) => (
-          <div key={index} className="flex items-center justify-between space-x-3">
-            <div className="flex items-center space-x-2">
-              <div
-                className="w-3 h-3 rounded-full"
-                style={{ backgroundColor: entry.color }}
-              />
-              <span className="text-sm text-gray-600">{entry.name}:</span>
+      <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-4">
+        <p className="text-sm font-medium text-gray-900 dark:text-white mb-2">
+          {label}
+        </p>
+        {payload.map((entry: any, index: number) => {
+          const config = metricConfigs[entry.dataKey];
+          if (!config) return null;
+          
+          return (
+            <div key={index} className="flex items-center justify-between space-x-4">
+              <div className="flex items-center space-x-2">
+                <div 
+                  className="w-3 h-3 rounded-full"
+                  style={{ backgroundColor: entry.color }}
+                />
+                <span className="text-sm text-gray-600 dark:text-gray-300">
+                  {config.label}:
+                </span>
+              </div>
+              <span className="text-sm font-medium text-gray-900 dark:text-white">
+                {formatValue(entry.value, config.format)}
+              </span>
             </div>
-            <span className="font-medium text-gray-900">
-              {metricConfig[entry.dataKey as keyof typeof metricConfig]?.formatter(entry.value) || entry.value}
-            </span>
-          </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // Custom legend
+  const CustomLegend = ({ payload }: any) => {
+    return (
+      <div className="flex flex-wrap justify-center gap-4 mt-4">
+        {payload.map((entry: any, index: number) => (
+          <button
+            key={index}
+            className={clsx(
+              'flex items-center space-x-2 px-3 py-1 rounded-full text-sm transition-all',
+              activeMetrics.includes(entry.dataKey)
+                ? 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white'
+                : 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'
+            )}
+            onClick={() => toggleMetric(entry.dataKey)}
+          >
+            <div 
+              className="w-3 h-3 rounded-full"
+              style={{ backgroundColor: entry.color }}
+            />
+            <span>{entry.value}</span>
+          </button>
         ))}
       </div>
     );
   };
 
-  // Loading state
-  if (loading) {
-    return (
-      <div className={`relative ${className}`} style={{ height }}>
-        <div className="absolute inset-0 flex items-center justify-center bg-gray-50 rounded-lg">
-          <div className="text-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-2"></div>
-            <p className="text-sm text-gray-500">Loading chart data...</p>
-          </div>
-        </div>
-      </div>
+  const toggleMetric = (metric: string) => {
+    setActiveMetrics(prev => 
+      prev.includes(metric)
+        ? prev.filter(m => m !== metric)
+        : [...prev, metric]
     );
-  }
+  };
 
-  // Empty state
-  if (chartData.length === 0) {
-    return (
-      <div className={`relative ${className}`} style={{ height }}>
-        <div className="absolute inset-0 flex items-center justify-center bg-gray-50 rounded-lg">
-          <div className="text-center">
-            <ChartLineIcon className="h-12 w-12 text-gray-300 mx-auto mb-3" />
-            <p className="text-sm text-gray-500">No data available</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  const renderChart = () => {
-    const commonProps = {
-      width: '100%',
-      height,
-      data: chartData,
-      margin: { top: 20, right: 30, left: 20, bottom: 5 },
-      onClick: onDataPointClick
-    };
-
-    switch (chartType) {
-      case 'area':
-        return (
-          <AreaChart {...commonProps}>
-            {showGrid && <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />}
-            <XAxis 
-              dataKey="date" 
-              tick={{ fontSize: 12, fill: '#6B7280' }}
-              axisLine={{ stroke: '#E5E7EB' }}
-            />
-            <YAxis 
-              tick={{ fontSize: 12, fill: '#6B7280' }}
-              axisLine={{ stroke: '#E5E7EB' }}
-            />
-            {showTooltip && <Tooltip content={<CustomTooltip />} />}
-            {showLegend && <Legend />}
-            
-            {metrics.map((metric, index) => {
-              const config = metricConfig[metric as keyof typeof metricConfig];
-              const isVisible = visibleMetrics.has(metric);
-              
-              return (
-                <Area
-                  key={metric}
-                  type="monotone"
-                  dataKey={metric}
-                  stroke={config?.color || colors[index % colors.length]}
-                  fill={config?.color || colors[index % colors.length]}
-                  fillOpacity={0.3}
-                  strokeWidth={config?.strokeWidth || 2}
-                  name={config?.label || metric}
-                  hide={!isVisible}
-                />
-              );
-            })}
-          </AreaChart>
-        );
-
-      case 'bar':
-        return (
-          <BarChart {...commonProps}>
-            {showGrid && <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />}
-            <XAxis 
-              dataKey="date" 
-              tick={{ fontSize: 12, fill: '#6B7280' }}
-              axisLine={{ stroke: '#E5E7EB' }}
-            />
-            <YAxis 
-              tick={{ fontSize: 12, fill: '#6B7280' }}
-              axisLine={{ stroke: '#E5E7EB' }}
-            />
-            {showTooltip && <Tooltip content={<CustomTooltip />} />}
-            {showLegend && <Legend />}
-            
-            {metrics.map((metric, index) => {
-              const config = metricConfig[metric as keyof typeof metricConfig];
-              const isVisible = visibleMetrics.has(metric);
-              
-              return (
-                <Bar
-                  key={metric}
-                  dataKey={metric}
-                  fill={config?.color || colors[index % colors.length]}
-                  name={config?.label || metric}
-                  hide={!isVisible}
-                />
-              );
-            })}
-          </BarChart>
-        );
-
-      default: // line
-        return (
-          <LineChart {...commonProps}>
-            {showGrid && <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />}
-            <XAxis 
-              dataKey="date" 
-              tick={{ fontSize: 12, fill: '#6B7280' }}
-              axisLine={{ stroke: '#E5E7EB' }}
-            />
-            <YAxis 
-              tick={{ fontSize: 12, fill: '#6B7280' }}
-              axisLine={{ stroke: '#E5E7EB' }}
-            />
-            {showTooltip && <Tooltip content={<CustomTooltip />} />}
-            {showLegend && <Legend />}
-            
-            {metrics.map((metric, index) => {
-              const config = metricConfig[metric as keyof typeof metricConfig];
-              const isVisible = visibleMetrics.has(metric);
-              
-              return (
-                <Line
-                  key={metric}
-                  type="monotone"
-                  dataKey={metric}
-                  stroke={config?.color || colors[index % colors.length]}
-                  strokeWidth={config?.strokeWidth || 2}
-                  dot={{ fill: config?.color || colors[index % colors.length], strokeWidth: 2, r: 4 }}
-                  activeDot={{ r: 6, strokeWidth: 0 }}
-                  name={config?.label || metric}
-                  hide={!isVisible}
-                />
-              );
-            })}
-          </LineChart>
-        );
+  const formatValue = (value: number, format: string) => {
+    switch (format) {
+      case 'currency':
+        return formatCurrency(value);
+      case 'percentage':
+        return formatPercentage(value);
+      case 'number':
+      default:
+        return formatNumber(value);
     }
   };
+
+  const formatDateForDisplay = (date: string, range: string) => {
+    const d = new Date(date);
+    switch (range) {
+      case 'day':
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      case 'week':
+        return `Week ${Math.ceil(d.getDate() / 7)}`;
+      case 'month':
+        return d.toLocaleDateString('en-US', { month: 'short' });
+      default:
+        return d.toLocaleDateString();
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className={clsx('bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6', className)}>
+        <div className="animate-pulse">
+          <div className="h-6 bg-gray-200 dark:bg-gray-700 rounded w-48 mb-4"></div>
+          <div className="h-80 bg-gray-200 dark:bg-gray-700 rounded"></div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data || data.length === 0) {
+    return (
+      <div className={clsx('bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6', className)}>
+        <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
+          {title}
+        </h3>
+        <div className="flex flex-col items-center justify-center h-80 text-gray-500 dark:text-gray-400">
+          <ChartBarIcon className="h-16 w-16 mb-4" />
+          <p className="text-lg font-medium">No data available</p>
+          <p className="text-sm">Try adjusting your filters or date range</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
-      className={`bg-white rounded-lg ${className}`}
+      className={clsx('bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6', className)}
     >
-      {/* Chart Header */}
-      <div className="flex items-center justify-between p-4 border-b border-gray-200">
-        <div className="flex items-center space-x-4">
-          <h3 className="text-lg font-medium text-gray-900">Performance Overview</h3>
-          
-          {/* Metric Toggle Buttons */}
-          <div className="flex items-center space-x-2">
-            {metrics.map(metric => {
-              const config = metricConfig[metric as keyof typeof metricConfig];
-              const trend = trends[metric];
-              const isVisible = visibleMetrics.has(metric);
-              
-              return (
-                <button
-                  key={metric}
-                  onClick={() => toggleMetric(metric)}
-                  onMouseEnter={() => setHoveredMetric(metric)}
-                  onMouseLeave={() => setHoveredMetric(null)}
-                  className={`
-                    flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium transition-all
-                    ${isVisible 
-                      ? 'bg-blue-100 text-blue-800 border border-blue-200' 
-                      : 'bg-gray-100 text-gray-600 border border-gray-200'
-                    }
-                    ${hoveredMetric === metric ? 'scale-105 shadow' : ''}
-                  `}
-                >
-                  <div
-                    className="w-2 h-2 rounded-full"
-                    style={{ backgroundColor: config?.color || '#9CA3AF' }}
-                  />
-                  <span>{config?.label || metric}</span>
-                  {trend && (
-                    <div className="flex items-center">
-                      {trend.direction === 'up' ? (
-                        <ArrowTrendingUpIcon className="h-3 w-3 text-green-500" />
-                      ) : trend.direction === 'down' ? (
-                        <ArrowTrendingDownIcon className="h-3 w-3 text-red-500" />
-                      ) : null}
-                    </div>
-                  )}
-                  {isVisible ? (
-                    <EyeIcon className="h-3 w-3" />
-                  ) : (
-                    <EyeSlashIcon className="h-3 w-3" />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Chart Type Selector */}
-        <div className="flex items-center space-x-1 bg-gray-100 rounded-lg p-1">
-          {[
-            { type: 'line', icon: ChartLineIcon, label: 'Line' },
-            { type: 'area', icon: ChartBarIcon, label: 'Area' },
-            { type: 'bar', icon: ChartBarIcon, label: 'Bar' }
-          ].map(({ type, icon: Icon, label }) => (
-            <button
-              key={type}
-              onClick={() => {}} // This would be handled by parent component
-              className={`
-                flex items-center space-x-1 px-2 py-1 rounded text-xs font-medium transition-colors
-                ${chartType === type 
-                  ? 'bg-white text-blue-600 shadow-sm' 
-                  : 'text-gray-600 hover:text-gray-900'
-                }
-              `}
-              title={`Switch to ${label} chart`}
-            >
-              <Icon className="h-4 w-4" />
-              <span className="hidden sm:inline">{label}</span>
-            </button>
-          ))}
+      <div className="flex items-center justify-between mb-6">
+        <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+          {title}
+        </h3>
+        
+        <div className="flex items-center space-x-2">
+          <button className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700">
+            <EyeIcon className="h-5 w-5" />
+          </button>
+          <button className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700">
+            <ArrowsPointingOutIcon className="h-5 w-5" />
+          </button>
         </div>
       </div>
 
-      {/* Chart Container */}
-      <div className="p-4">
-        <ResponsiveContainer width="100%" height={height}>
-          {renderChart()}
+      <div style={{ width: '100%', height }}>
+        <ResponsiveContainer>
+          <LineChart
+            data={chartData}
+            margin={{ top: 20, right: 30, left: 20, bottom: 20 }}
+            onClick={onDataPointClick}
+          >
+            {showGrid && (
+              <CartesianGrid 
+                strokeDasharray="3 3" 
+                stroke="#E5E7EB"
+                className="dark:stroke-gray-600"
+              />
+            )}
+            
+            <XAxis 
+              dataKey="formattedDate"
+              stroke="#6B7280"
+              fontSize={12}
+              tickLine={false}
+              axisLine={false}
+            />
+            
+            <YAxis
+              yAxisId="left"
+              stroke="#6B7280"
+              fontSize={12}
+              tickLine={false}
+              axisLine={false}
+              tickFormatter={(value) => formatNumber(value)}
+            />
+            
+            {needsDualAxis && (
+              <YAxis
+                yAxisId="right"
+                orientation="right"
+                stroke="#6B7280"
+                fontSize={12}
+                tickLine={false}
+                axisLine={false}
+                tickFormatter={(value) => formatNumber(value)}
+              />
+            )}
+            
+            {showTooltip && <Tooltip content={<CustomTooltip />} />}
+            
+            {showLegend && (
+              <Legend content={<CustomLegend />} />
+            )}
+
+            {activeMetricConfigs.map((config) => (
+              <Line
+                key={config.key}
+                type="monotone"
+                dataKey={config.key}
+                stroke={config.color}
+                strokeWidth={
+                  focusedLine && focusedLine !== config.key ? 1 : config.strokeWidth
+                }
+                strokeDasharray={config.strokeDasharray}
+                yAxisId={config.yAxisId || 'left'}
+                dot={{ fill: config.color, strokeWidth: 2, r: 4 }}
+                activeDot={{ r: 6, stroke: config.color, strokeWidth: 2 }}
+                opacity={
+                  focusedLine && focusedLine !== config.key ? 0.3 : 1
+                }
+                onMouseEnter={() => setFocusedLine(config.key)}
+                onMouseLeave={() => setFocusedLine(null)}
+              />
+            ))}
+
+            {showBrush && data.length > 10 && (
+              <Brush
+                dataKey="formattedDate"
+                height={30}
+                stroke="#8B5CF6"
+                fill="#EDE9FE"
+              />
+            )}
+          </LineChart>
         </ResponsiveContainer>
       </div>
 
-      {/* Chart Summary */}
-      <div className="px-4 pb-4">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {metrics.filter(metric => visibleMetrics.has(metric)).map(metric => {
-            const config = metricConfig[metric as keyof typeof metricConfig];
-            const trend = trends[metric];
-            const latestValue = chartData[chartData.length - 1]?.[metric as keyof ChartDataPoint] as number;
-            
-            return (
-              <div key={metric} className="text-center">
-                <div className="flex items-center justify-center space-x-1 mb-1">
-                  <div
-                    className="w-2 h-2 rounded-full"
-                    style={{ backgroundColor: config?.color }}
-                  />
-                  <span className="text-xs text-gray-500">{config?.label}</span>
-                  {trend && (
-                    <div className="flex items-center">
-                      {trend.direction === 'up' ? (
-                        <ArrowTrendingUpIcon className="h-3 w-3 text-green-500" />
-                      ) : trend.direction === 'down' ? (
-                        <ArrowTrendingDownIcon className="h-3 w-3 text-red-500" />
-                      ) : null}
-                      <span className={`text-xs ml-1 ${
-                        trend.direction === 'up' ? 'text-green-600' : 
-                        trend.direction === 'down' ? 'text-red-600' : 'text-gray-500'
-                      }`}>
-                        {trend.percentage.toFixed(1)}%
-                      </span>
-                    </div>
-                  )}
-                </div>
-                <div className="font-medium text-gray-900">
-                  {config?.formatter(latestValue || 0) || '—'}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+      {/* Chart statistics */}
+      <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
+        {activeMetricConfigs.slice(0, 4).map((config) => {
+          const values = chartData.map(d => d[config.key as keyof DataPoint] as number || 0);
+          const total = values.reduce((sum, val) => sum + val, 0);
+          const average = total / values.length;
+          const max = Math.max(...values);
+          
+          return (
+            <div key={config.key} className="text-center">
+              <div 
+                className="w-3 h-3 rounded-full mx-auto mb-1"
+                style={{ backgroundColor: config.color }}
+              />
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {config.label} Avg
+              </p>
+              <p className="text-sm font-medium text-gray-900 dark:text-white">
+                {formatValue(average, config.format)}
+              </p>
+            </div>
+          );
+        })}
       </div>
     </motion.div>
   );

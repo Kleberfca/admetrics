@@ -1,287 +1,331 @@
-// frontend/src/components/dashboard/MetricCard.tsx
-import React from 'react';
+import React, { useMemo } from 'react';
 import { motion } from 'framer-motion';
 import {
   ArrowTrendingUpIcon,
   ArrowTrendingDownIcon,
-  MinusIcon
+  InformationCircleIcon,
 } from '@heroicons/react/24/outline';
-import { formatPercentage } from '../../utils/formatters';
+import { formatCurrency, formatNumber, formatPercentage } from '../../utils/formatters';
+import clsx from 'clsx';
 
 interface MetricCardProps {
   title: string;
-  value: string | number;
-  change?: number;
-  trend?: 'up' | 'down' | 'neutral';
-  icon: React.ComponentType<React.SVGProps<SVGSVGElement>>;
-  color?: 'blue' | 'green' | 'purple' | 'orange' | 'red' | 'gray';
+  value: number;
+  previousValue?: number;
+  format?: 'currency' | 'number' | 'percentage';
+  icon?: React.ReactNode;
   loading?: boolean;
-  onClick?: () => void;
-  subtitle?: string;
-  helpText?: string;
-  showTrend?: boolean;
+  trend?: {
+    value: number;
+    label?: string;
+  };
+  comparison?: {
+    value: number;
+    label: string;
+    period: string;
+  };
+  description?: string;
+  color?: 'blue' | 'green' | 'yellow' | 'red' | 'purple' | 'indigo';
   size?: 'sm' | 'md' | 'lg';
+  className?: string;
+  onClick?: () => void;
 }
-
-const colorClasses = {
-  blue: {
-    bg: 'bg-blue-50',
-    icon: 'text-blue-600',
-    border: 'border-blue-200',
-    hover: 'hover:bg-blue-100'
-  },
-  green: {
-    bg: 'bg-green-50',
-    icon: 'text-green-600',
-    border: 'border-green-200',
-    hover: 'hover:bg-green-100'
-  },
-  purple: {
-    bg: 'bg-purple-50',
-    icon: 'text-purple-600',
-    border: 'border-purple-200',
-    hover: 'hover:bg-purple-100'
-  },
-  orange: {
-    bg: 'bg-orange-50',
-    icon: 'text-orange-600',
-    border: 'border-orange-200',
-    hover: 'hover:bg-orange-100'
-  },
-  red: {
-    bg: 'bg-red-50',
-    icon: 'text-red-600',
-    border: 'border-red-200',
-    hover: 'hover:bg-red-100'
-  },
-  gray: {
-    bg: 'bg-gray-50',
-    icon: 'text-gray-600',
-    border: 'border-gray-200',
-    hover: 'hover:bg-gray-100'
-  }
-};
-
-const sizeClasses = {
-  sm: 'p-4',
-  md: 'p-6',
-  lg: 'p-8'
-};
 
 const MetricCard: React.FC<MetricCardProps> = ({
   title,
   value,
-  change,
-  trend,
-  icon: Icon,
-  color = 'blue',
+  previousValue,
+  format = 'number',
+  icon,
   loading = false,
+  trend,
+  comparison,
+  description,
+  color = 'blue',
+  size = 'md',
+  className,
   onClick,
-  subtitle,
-  helpText,
-  showTrend = true,
-  size = 'md'
 }) => {
-  const colors = colorClasses[color];
-  const isClickable = !!onClick;
+  // Calculate trend if previous value is provided and trend is not explicitly set
+  const calculatedTrend = useMemo(() => {
+    if (trend) return trend;
+    if (previousValue === undefined) return null;
+    
+    const change = value - previousValue;
+    const percentage = previousValue === 0 ? 
+      (value > 0 ? 100 : 0) : 
+      ((change / previousValue) * 100);
+    
+    return {
+      value: percentage,
+      label: `vs previous period`,
+    };
+  }, [trend, value, previousValue]);
 
-  const getTrendIcon = () => {
-    switch (trend) {
-      case 'up':
-        return ArrowTrendingUpIcon;
-      case 'down':
-        return ArrowTrendingDownIcon;
+  // Format the main value
+  const formattedValue = useMemo(() => {
+    if (loading) return '---';
+    
+    switch (format) {
+      case 'currency':
+        return formatCurrency(value);
+      case 'percentage':
+        return formatPercentage(value);
+      case 'number':
       default:
-        return MinusIcon;
+        return formatNumber(value);
     }
+  }, [value, format, loading]);
+
+  // Determine trend direction and styling
+  const trendDirection = calculatedTrend ? 
+    (calculatedTrend.value > 0 ? 'up' : calculatedTrend.value < 0 ? 'down' : 'neutral') : 
+    'neutral';
+
+  // Color schemes
+  const colorSchemes = {
+    blue: {
+      bg: 'bg-blue-50 dark:bg-blue-900/20',
+      border: 'border-blue-200 dark:border-blue-800',
+      icon: 'text-blue-600 dark:text-blue-400',
+      accent: 'text-blue-600 dark:text-blue-400',
+    },
+    green: {
+      bg: 'bg-green-50 dark:bg-green-900/20',
+      border: 'border-green-200 dark:border-green-800',
+      icon: 'text-green-600 dark:text-green-400',
+      accent: 'text-green-600 dark:text-green-400',
+    },
+    yellow: {
+      bg: 'bg-yellow-50 dark:bg-yellow-900/20',
+      border: 'border-yellow-200 dark:border-yellow-800',
+      icon: 'text-yellow-600 dark:text-yellow-400',
+      accent: 'text-yellow-600 dark:text-yellow-400',
+    },
+    red: {
+      bg: 'bg-red-50 dark:bg-red-900/20',
+      border: 'border-red-200 dark:border-red-800',
+      icon: 'text-red-600 dark:text-red-400',
+      accent: 'text-red-600 dark:text-red-400',
+    },
+    purple: {
+      bg: 'bg-purple-50 dark:bg-purple-900/20',
+      border: 'border-purple-200 dark:border-purple-800',
+      icon: 'text-purple-600 dark:text-purple-400',
+      accent: 'text-purple-600 dark:text-purple-400',
+    },
+    indigo: {
+      bg: 'bg-indigo-50 dark:bg-indigo-900/20',
+      border: 'border-indigo-200 dark:border-indigo-800',
+      icon: 'text-indigo-600 dark:text-indigo-400',
+      accent: 'text-indigo-600 dark:text-indigo-400',
+    },
   };
 
-  const getTrendColor = () => {
-    switch (trend) {
-      case 'up':
-        return 'text-green-600 bg-green-100';
-      case 'down':
-        return 'text-red-600 bg-red-100';
-      default:
-        return 'text-gray-600 bg-gray-100';
-    }
+  const colorScheme = colorSchemes[color];
+
+  // Size variants
+  const sizeVariants = {
+    sm: {
+      container: 'p-4',
+      title: 'text-sm',
+      value: 'text-xl',
+      icon: 'h-5 w-5',
+    },
+    md: {
+      container: 'p-6',
+      title: 'text-sm',
+      value: 'text-2xl',
+      icon: 'h-6 w-6',
+    },
+    lg: {
+      container: 'p-8',
+      title: 'text-base',
+      value: 'text-3xl',
+      icon: 'h-8 w-8',
+    },
   };
 
-  const renderContent = () => {
-    if (loading) {
-      return (
-        <div className="animate-pulse">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center">
-              <div className={`p-3 rounded-lg ${colors.bg}`}>
-                <div className="h-6 w-6 bg-gray-300 rounded"></div>
-              </div>
-            </div>
-            <div className="h-4 bg-gray-300 rounded w-16"></div>
-          </div>
-          
-          <div className="mt-4">
-            <div className="h-3 bg-gray-300 rounded w-24 mb-2"></div>
-            <div className="h-8 bg-gray-300 rounded w-32"></div>
-          </div>
-          
-          {showTrend && (
-            <div className="mt-4 flex items-center">
-              <div className="h-4 bg-gray-300 rounded w-20"></div>
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    return (
-      <>
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center">
-            <div className={`p-3 rounded-lg ${colors.bg} ${colors.border} border`}>
-              <Icon className={`h-6 w-6 ${colors.icon}`} />
-            </div>
-            {helpText && (
-              <div className="ml-2 group relative">
-                <button className="text-gray-400 hover:text-gray-600">
-                  <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-3a1 1 0 00-.867.5 1 1 0 11-1.731-1A3 3 0 0113 8a3.001 3.001 0 01-2 2.83V11a1 1 0 11-2 0v-1a1 1 0 011-1 1 1 0 100-2zm0 8a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-                  </svg>
-                </button>
-                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 text-sm text-white bg-gray-900 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-10 whitespace-nowrap">
-                  {helpText}
-                  <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-900"></div>
-                </div>
-              </div>
-            )}
-          </div>
-          
-          {isClickable && (
-            <button className="text-gray-400 hover:text-gray-600">
-              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
-            </button>
-          )}
-        </div>
-
-        {/* Content */}
-        <div className="mt-4">
-          <div className="flex items-baseline justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600 truncate">
-                {title}
-              </p>
-              {subtitle && (
-                <p className="text-xs text-gray-500 mt-1 truncate">
-                  {subtitle}
-                </p>
-              )}
-            </div>
-          </div>
-          
-          <div className="mt-2">
-            <p className="text-2xl font-bold text-gray-900 truncate">
-              {value}
-            </p>
-          </div>
-        </div>
-
-        {/* Trend */}
-        {showTrend && change !== undefined && trend && (
-          <div className="mt-4 flex items-center">
-            <div className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${getTrendColor()}`}>
-              {React.createElement(getTrendIcon(), { className: 'h-3 w-3 mr-1' })}
-              {formatPercentage(Math.abs(change))}
-            </div>
-            <span className="ml-2 text-xs text-gray-500">
-              vs previous period
-            </span>
-          </div>
-        )}
-      </>
-    );
-  };
+  const sizeVariant = sizeVariants[size];
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
-      className={`
-        bg-white rounded-lg shadow-sm border border-gray-200 ${sizeClasses[size]}
-        ${isClickable ? `cursor-pointer ${colors.hover} transition-colors duration-200` : ''}
-      `}
+      className={clsx(
+        'relative overflow-hidden rounded-lg border bg-white dark:bg-gray-800 shadow-sm transition-all duration-200',
+        colorScheme.border,
+        onClick && 'cursor-pointer hover:shadow-md',
+        sizeVariant.container,
+        className
+      )}
       onClick={onClick}
-      whileHover={isClickable ? { scale: 1.02 } : undefined}
-      whileTap={isClickable ? { scale: 0.98 } : undefined}
     >
-      {renderContent()}
+      {loading && (
+        <div className="absolute inset-0 bg-white/50 dark:bg-gray-800/50 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-gray-900 dark:border-white"></div>
+        </div>
+      )}
+
+      <div className="flex items-center">
+        <div className="flex-1">
+          <div className="flex items-center justify-between">
+            <p className={clsx(
+              'font-medium text-gray-600 dark:text-gray-300',
+              sizeVariant.title
+            )}>
+              {title}
+            </p>
+            
+            {description && (
+              <div className="group relative">
+                <InformationCircleIcon className="h-4 w-4 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" />
+                <div className="absolute right-0 top-6 hidden group-hover:block z-10">
+                  <div className="bg-gray-900 dark:bg-gray-700 text-white text-xs rounded py-1 px-2 whitespace-nowrap">
+                    {description}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-baseline space-x-2">
+            <p className={clsx(
+              'font-bold text-gray-900 dark:text-white',
+              sizeVariant.value
+            )}>
+              {formattedValue}
+            </p>
+
+            {calculatedTrend && (
+              <div className={clsx(
+                'flex items-center text-sm font-medium',
+                trendDirection === 'up' && 'text-green-600 dark:text-green-400',
+                trendDirection === 'down' && 'text-red-600 dark:text-red-400',
+                trendDirection === 'neutral' && 'text-gray-500 dark:text-gray-400'
+              )}>
+                {trendDirection === 'up' && (
+                  <ArrowTrendingUpIcon className="h-4 w-4 mr-1" />
+                )}
+                {trendDirection === 'down' && (
+                  <ArrowTrendingDownIcon className="h-4 w-4 mr-1" />
+                )}
+                
+                <span>
+                  {Math.abs(calculatedTrend.value).toFixed(1)}%
+                </span>
+              </div>
+            )}
+          </div>
+
+          {calculatedTrend?.label && (
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              {calculatedTrend.label}
+            </p>
+          )}
+
+          {comparison && (
+            <div className="mt-2 text-xs">
+              <span className="text-gray-500 dark:text-gray-400">
+                {comparison.label}: 
+              </span>
+              <span className="font-medium text-gray-700 dark:text-gray-300 ml-1">
+                {formatNumber(comparison.value)}
+              </span>
+              <span className="text-gray-500 dark:text-gray-400 ml-1">
+                ({comparison.period})
+              </span>
+            </div>
+          )}
+        </div>
+
+        {icon && (
+          <div className={clsx(
+            'flex-shrink-0 rounded-full p-3',
+            colorScheme.bg
+          )}>
+            <div className={clsx(colorScheme.icon, sizeVariant.icon)}>
+              {icon}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Decorative accent */}
+      <div className={clsx(
+        'absolute bottom-0 left-0 h-1 w-full opacity-50',
+        colorScheme.accent.replace('text-', 'bg-')
+      )} />
     </motion.div>
   );
 };
 
-// Skeleton component for loading states
-export const MetricCardSkeleton: React.FC<{ count?: number }> = ({ count = 1 }) => {
+// Skeleton loader component
+export const MetricCardSkeleton: React.FC<{ size?: 'sm' | 'md' | 'lg' }> = ({ 
+  size = 'md' 
+}) => {
+  const sizeVariants = {
+    sm: 'p-4',
+    md: 'p-6',
+    lg: 'p-8',
+  };
+
   return (
-    <>
-      {Array.from({ length: count }).map((_, index) => (
-        <MetricCard
-          key={index}
-          title=""
-          value=""
-          icon={() => <div />}
-          loading={true}
-        />
-      ))}
-    </>
+    <div className={clsx(
+      'rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-sm',
+      sizeVariants[size]
+    )}>
+      <div className="animate-pulse">
+        <div className="flex items-center justify-between mb-2">
+          <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded w-20"></div>
+          <div className="h-4 w-4 bg-gray-200 dark:bg-gray-700 rounded-full"></div>
+        </div>
+        <div className="flex items-baseline space-x-2">
+          <div className="h-8 bg-gray-200 dark:bg-gray-700 rounded w-24"></div>
+          <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded w-12"></div>
+        </div>
+        <div className="h-3 bg-gray-200 dark:bg-gray-700 rounded w-16 mt-2"></div>
+      </div>
+    </div>
   );
 };
 
-// Preset metric cards
-export const SpendMetricCard: React.FC<Omit<MetricCardProps, 'icon' | 'color'>> = (props) => (
-  <MetricCard
-    {...props}
-    icon={props.icon || ((props: any) => (
-      <svg {...props} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1" />
-      </svg>
-    ))}
-    color="blue"
-  />
-);
+// Grid container for multiple metric cards
+export const MetricCardsGrid: React.FC<{
+  children: React.ReactNode;
+  columns?: 1 | 2 | 3 | 4;
+  gap?: 'sm' | 'md' | 'lg';
+  className?: string;
+}> = ({ 
+  children, 
+  columns = 4, 
+  gap = 'md',
+  className 
+}) => {
+  const gridCols = {
+    1: 'grid-cols-1',
+    2: 'grid-cols-1 sm:grid-cols-2',
+    3: 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3',
+    4: 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4',
+  };
 
-export const ClicksMetricCard: React.FC<Omit<MetricCardProps, 'icon' | 'color'>> = (props) => (
-  <MetricCard
-    {...props}
-    icon={props.icon || ((props: any) => (
-      <svg {...props} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122" />
-      </svg>
-    ))}
-    color="green"
-  />
-);
+  const gapSizes = {
+    sm: 'gap-3',
+    md: 'gap-4',
+    lg: 'gap-6',
+  };
 
-export const ConversionsMetricCard: React.FC<Omit<MetricCardProps, 'icon' | 'color'>> = (props) => (
-  <MetricCard
-    {...props}
-    icon={props.icon || ((props: any) => (
-      <svg {...props} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-      </svg>
-    ))}
-    color="purple"
-  />
-);
-
-export const ROASMetricCard: React.FC<Omit<MetricCardProps, 'icon' | 'color'>> = (props) => (
-  <MetricCard
-    {...props}
-    icon={props.icon || ArrowTrendingUpIcon}
-    color="orange"
-  />
-);
+  return (
+    <div className={clsx(
+      'grid',
+      gridCols[columns],
+      gapSizes[gap],
+      className
+    )}>
+      {children}
+    </div>
+  );
+};
 
 export default MetricCard;

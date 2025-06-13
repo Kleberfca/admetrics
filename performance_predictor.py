@@ -1,550 +1,522 @@
 """
 Performance Predictor Model
-This module implements time series forecasting for advertising campaign performance prediction.
+Predicts future campaign performance based on historical data
 """
+
+import os
+import pickle
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional, Tuple
+import warnings
+warnings.filterwarnings('ignore')
 
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
-import logging
-
-# Machine Learning imports
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.model_selection import train_test_split, TimeSeriesSplit
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split, cross_val_score, TimeSeriesSplit
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import lightgbm as lgb
 from prophet import Prophet
 import joblib
-
-# Deep Learning imports
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-
-# Statistical imports
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.seasonal import seasonal_decompose
-from statsmodels.tsa.stattools import adfuller
 
 logger = logging.getLogger(__name__)
 
 class PerformancePredictor:
     """
-    Advanced time series forecasting model for advertising campaign performance.
-    Supports multiple algorithms including Prophet, LSTM, ARIMA, and ensemble methods.
+    AI model for predicting campaign performance metrics
     """
     
-    def __init__(self, model_type: str = 'ensemble'):
-        """
-        Initialize the Performance Predictor.
-        
-        Args:
-            model_type: Type of model to use ('prophet', 'lstm', 'arima', 'ensemble')
-        """
-        self.model_type = model_type
+    def __init__(self, model_path: Optional[str] = None):
+        self.model_path = model_path or 'models/performance_predictor'
         self.models = {}
         self.scalers = {}
-        self.feature_importance = {}
+        self.feature_columns = []
+        self.target_metrics = ['spend', 'clicks', 'conversions', 'impressions']
         self.is_trained = False
+        self.model_version = "1.0.0"
+        self.last_trained = None
+        self.accuracy_metrics = {}
         
         # Model configurations
-        self.prophet_config = {
-            'seasonality_mode': 'multiplicative',
-            'yearly_seasonality': True,
-            'weekly_seasonality': True,
-            'daily_seasonality': False,
-            'holidays_prior_scale': 10.0,
-            'seasonality_prior_scale': 10.0,
-            'changepoint_prior_scale': 0.05
+        self.model_configs = {
+            'random_forest': {
+                'n_estimators': 100,
+                'max_depth': 20,
+                'min_samples_split': 5,
+                'min_samples_leaf': 2,
+                'random_state': 42
+            },
+            'gradient_boosting': {
+                'n_estimators': 100,
+                'learning_rate': 0.1,
+                'max_depth': 8,
+                'min_samples_split': 5,
+                'random_state': 42
+            },
+            'lightgbm': {
+                'n_estimators': 100,
+                'learning_rate': 0.1,
+                'max_depth': 8,
+                'num_leaves': 31,
+                'feature_fraction': 0.8,
+                'bagging_fraction': 0.8,
+                'bagging_freq': 5,
+                'random_state': 42,
+                'verbose': -1
+            }
         }
         
-        self.lstm_config = {
-            'sequence_length': 30,
-            'lstm_units': [128, 64, 32],
-            'dropout_rate': 0.3,
-            'batch_size': 32,
-            'epochs': 100,
-            'learning_rate': 0.001
-        }
-        
-        self.ensemble_weights = {
-            'prophet': 0.3,
-            'lstm': 0.35,
-            'lightgbm': 0.25,
-            'arima': 0.1
-        }
-
-    def prepare_features(self, data: pd.DataFrame) -> pd.DataFrame:
+        # Ensure model directory exists
+        os.makedirs(self.model_path, exist_ok=True)
+    
+    def prepare_features(self, data: List[Dict]) -> pd.DataFrame:
         """
-        Prepare features for time series forecasting.
-        
-        Args:
-            data: DataFrame with time series data
+        Prepare features from raw campaign data
+        """
+        try:
+            df = pd.DataFrame(data)
             
-        Returns:
-            DataFrame with engineered features
-        """
-        df = data.copy()
-        
-        # Ensure datetime index
-        if 'date' in df.columns:
+            if df.empty:
+                raise ValueError("No data provided for feature preparation")
+            
+            # Convert date column
             df['date'] = pd.to_datetime(df['date'])
-            df.set_index('date', inplace=True)
-        
-        # Basic time features
-        df['year'] = df.index.year
-        df['month'] = df.index.month
-        df['day'] = df.index.day
-        df['day_of_week'] = df.index.dayofweek
-        df['week_of_year'] = df.index.week
-        df['quarter'] = df.index.quarter
-        
-        # Cyclical features
-        df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
-        df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
-        df['day_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
-        df['day_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
-        
-        # Weekend indicator
-        df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
-        
-        # Month-end/start indicators
-        df['is_month_start'] = df.index.is_month_start.astype(int)
-        df['is_month_end'] = df.index.is_month_end.astype(int)
-        
-        # Lag features
-        for metric in ['spend', 'clicks', 'conversions', 'impressions']:
-            if metric in df.columns:
-                for lag in [1, 3, 7, 14, 30]:
-                    df[f'{metric}_lag_{lag}'] = df[metric].shift(lag)
+            df = df.sort_values('date').reset_index(drop=True)
+            
+            # Create time-based features
+            df['day_of_week'] = df['date'].dt.dayofweek
+            df['day_of_month'] = df['date'].dt.day
+            df['month'] = df['date'].dt.month
+            df['quarter'] = df['date'].dt.quarter
+            df['week_of_year'] = df['date'].dt.isocalendar().week
+            df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
+            
+            # Create lag features (previous day performance)
+            for metric in self.target_metrics:
+                if metric in df.columns:
+                    df[f'{metric}_lag_1'] = df[metric].shift(1)
+                    df[f'{metric}_lag_3'] = df[metric].shift(3)
+                    df[f'{metric}_lag_7'] = df[metric].shift(7)
+            
+            # Create rolling averages
+            for metric in self.target_metrics:
+                if metric in df.columns:
+                    df[f'{metric}_rolling_3'] = df[metric].rolling(window=3, min_periods=1).mean()
+                    df[f'{metric}_rolling_7'] = df[metric].rolling(window=7, min_periods=1).mean()
+                    df[f'{metric}_rolling_14'] = df[metric].rolling(window=14, min_periods=1).mean()
+            
+            # Create trend features
+            for metric in self.target_metrics:
+                if metric in df.columns:
+                    df[f'{metric}_trend_3'] = df[metric].rolling(window=3).apply(
+                        lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else 0
+                    )
+                    df[f'{metric}_trend_7'] = df[metric].rolling(window=7).apply(
+                        lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else 0
+                    )
+            
+            # Create ratio features
+            if 'clicks' in df.columns and 'impressions' in df.columns:
+                df['ctr_calculated'] = np.where(df['impressions'] > 0, 
+                                              df['clicks'] / df['impressions'], 0)
+            
+            if 'spend' in df.columns and 'clicks' in df.columns:
+                df['cpc_calculated'] = np.where(df['clicks'] > 0, 
+                                              df['spend'] / df['clicks'], 0)
+            
+            if 'spend' in df.columns and 'conversions' in df.columns:
+                df['cpa_calculated'] = np.where(df['conversions'] > 0, 
+                                              df['spend'] / df['conversions'], 0)
+            
+            # Add campaign characteristics if available
+            if 'platform' in df.columns:
+                # Encode platform
+                le_platform = LabelEncoder()
+                df['platform_encoded'] = le_platform.fit_transform(df['platform'].astype(str))
+            
+            # Fill NaN values
+            df = df.fillna(0)
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error preparing features: {e}")
+            raise
+    
+    def train(self, training_data: List[Dict], validation_split: float = 0.2) -> Dict[str, Any]:
+        """
+        Train the performance prediction models
+        """
+        try:
+            logger.info("Starting performance predictor training...")
+            
+            # Prepare features
+            df = self.prepare_features(training_data)
+            
+            if len(df) < 10:
+                raise ValueError("Insufficient training data (minimum 10 records required)")
+            
+            # Define feature columns (exclude date and target metrics)
+            feature_cols = [col for col in df.columns 
+                          if col not in ['date'] + self.target_metrics]
+            self.feature_columns = feature_cols
+            
+            X = df[feature_cols].values
+            
+            # Train models for each target metric
+            training_results = {}
+            
+            for metric in self.target_metrics:
+                if metric not in df.columns:
+                    logger.warning(f"Metric {metric} not found in training data, skipping...")
+                    continue
                 
-                # Rolling statistics
-                for window in [3, 7, 14, 30]:
-                    df[f'{metric}_rolling_mean_{window}'] = df[metric].rolling(window).mean()
-                    df[f'{metric}_rolling_std_{window}'] = df[metric].rolling(window).std()
-                    df[f'{metric}_rolling_min_{window}'] = df[metric].rolling(window).min()
-                    df[f'{metric}_rolling_max_{window}'] = df[metric].rolling(window).max()
-        
-        # Derived metrics
-        if 'spend' in df.columns and 'clicks' in df.columns:
-            df['cpc'] = df['spend'] / df['clicks'].replace(0, np.nan)
-            df['cpc'] = df['cpc'].fillna(df['cpc'].median())
-        
-        if 'clicks' in df.columns and 'impressions' in df.columns:
-            df['ctr'] = df['clicks'] / df['impressions'].replace(0, np.nan)
-            df['ctr'] = df['ctr'].fillna(df['ctr'].median())
-        
-        if 'conversions' in df.columns and 'clicks' in df.columns:
-            df['conversion_rate'] = df['conversions'] / df['clicks'].replace(0, np.nan)
-            df['conversion_rate'] = df['conversion_rate'].fillna(df['conversion_rate'].median())
-        
-        # Platform-specific features
-        if 'platform' in df.columns:
-            platform_encoder = LabelEncoder()
-            df['platform_encoded'] = platform_encoder.fit_transform(df['platform'])
+                y = df[metric].values
+                
+                # Split data for training and validation
+                # Use time series split to maintain temporal order
+                tscv = TimeSeriesSplit(n_splits=3)
+                
+                # Scale features
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X)
+                self.scalers[metric] = scaler
+                
+                # Train multiple models and ensemble them
+                models = {}
+                scores = {}
+                
+                # Random Forest
+                rf_model = RandomForestRegressor(**self.model_configs['random_forest'])
+                rf_scores = cross_val_score(rf_model, X_scaled, y, cv=tscv, scoring='neg_mean_squared_error')
+                rf_model.fit(X_scaled, y)
+                models['random_forest'] = rf_model
+                scores['random_forest'] = -rf_scores.mean()
+                
+                # Gradient Boosting
+                gb_model = GradientBoostingRegressor(**self.model_configs['gradient_boosting'])
+                gb_scores = cross_val_score(gb_model, X_scaled, y, cv=tscv, scoring='neg_mean_squared_error')
+                gb_model.fit(X_scaled, y)
+                models['gradient_boosting'] = gb_model
+                scores['gradient_boosting'] = -gb_scores.mean()
+                
+                # LightGBM
+                lgb_model = lgb.LGBMRegressor(**self.model_configs['lightgbm'])
+                lgb_scores = cross_val_score(lgb_model, X_scaled, y, cv=tscv, scoring='neg_mean_squared_error')
+                lgb_model.fit(X_scaled, y)
+                models['lightgbm'] = lgb_model
+                scores['lightgbm'] = -lgb_scores.mean()
+                
+                # Store models and select best performing one
+                self.models[metric] = models
+                best_model_name = min(scores, key=scores.get)
+                
+                # Calculate accuracy metrics on validation set
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X_scaled, y, test_size=validation_split, 
+                    shuffle=False  # Maintain temporal order
+                )
+                
+                best_model = models[best_model_name]
+                y_pred = best_model.predict(X_val)
+                
+                self.accuracy_metrics[metric] = {
+                    'mse': mean_squared_error(y_val, y_pred),
+                    'mae': mean_absolute_error(y_val, y_pred),
+                    'r2': r2_score(y_val, y_pred),
+                    'best_model': best_model_name,
+                    'cv_scores': scores
+                }
+                
+                training_results[metric] = {
+                    'best_model': best_model_name,
+                    'mse': self.accuracy_metrics[metric]['mse'],
+                    'mae': self.accuracy_metrics[metric]['mae'],
+                    'r2': self.accuracy_metrics[metric]['r2']
+                }
+                
+                logger.info(f"Trained {metric} predictor - Best: {best_model_name}, R²: {self.accuracy_metrics[metric]['r2']:.3f}")
             
-            # Platform performance history
-            for platform in df['platform'].unique():
-                platform_mask = df['platform'] == platform
-                df.loc[platform_mask, 'platform_avg_cpc'] = df.loc[platform_mask, 'cpc'].mean()
-                df.loc[platform_mask, 'platform_avg_ctr'] = df.loc[platform_mask, 'ctr'].mean()
-        
-        # External factors (holidays, seasonality)
-        df['is_holiday'] = self._identify_holidays(df.index)
-        df['seasonality_index'] = self._calculate_seasonality_index(df.index)
-        
-        # Competition index (simulated - would be replaced with real data)
-        df['competition_index'] = np.random.normal(1.0, 0.1, len(df))
-        
-        return df
-
-    def _identify_holidays(self, dates: pd.DatetimeIndex) -> pd.Series:
-        """Identify major holidays that might affect ad performance."""
-        # Simple holiday detection - would be enhanced with actual holiday calendar
-        holidays = []
-        for date in dates:
-            if (date.month == 12 and date.day in [24, 25, 31]) or \
-               (date.month == 1 and date.day == 1) or \
-               (date.month == 11 and date.day >= 22 and date.day <= 28 and date.dayofweek == 3):  # Thanksgiving
-                holidays.append(1)
-            else:
-                holidays.append(0)
-        return pd.Series(holidays, index=dates)
-
-    def _calculate_seasonality_index(self, dates: pd.DatetimeIndex) -> pd.Series:
-        """Calculate seasonality index for advertising performance."""
-        # Shopping seasons
-        seasonality = []
-        for date in dates:
-            if date.month in [11, 12]:  # Holiday shopping season
-                seasonality.append(1.3)
-            elif date.month in [6, 7, 8]:  # Summer season
-                seasonality.append(1.1)
-            elif date.month in [1, 2]:  # Post-holiday
-                seasonality.append(0.8)
-            else:
-                seasonality.append(1.0)
-        return pd.Series(seasonality, index=dates)
-
-    def train_prophet_model(self, data: pd.DataFrame, target_metric: str) -> Prophet:
-        """Train Prophet model for time series forecasting."""
-        prophet_data = data.reset_index()[['date', target_metric]].rename(
-            columns={'date': 'ds', target_metric: 'y'}
-        )
-        
-        # Remove any missing values
-        prophet_data = prophet_data.dropna()
-        
-        model = Prophet(**self.prophet_config)
-        
-        # Add custom seasonalities
-        model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
-        
-        # Add holidays (placeholder - would use real holiday data)
-        holidays = pd.DataFrame({
-            'holiday': 'holiday',
-            'ds': pd.to_datetime(['2023-12-25', '2024-01-01', '2024-11-28']),
-            'lower_window': 0,
-            'upper_window': 1,
-        })
-        model.holidays = holidays
-        
-        model.fit(prophet_data)
-        return model
-
-    def train_lstm_model(self, data: pd.DataFrame, target_metric: str) -> tf.keras.Model:
-        """Train LSTM model for time series forecasting."""
-        # Prepare sequences
-        scaler = StandardScaler()
-        scaled_data = scaler.fit_transform(data[[target_metric]])
-        
-        def create_sequences(data, seq_length):
-            X, y = [], []
-            for i in range(len(data) - seq_length):
-                X.append(data[i:(i + seq_length), 0])
-                y.append(data[i + seq_length, 0])
-            return np.array(X), np.array(y)
-        
-        X, y = create_sequences(scaled_data, self.lstm_config['sequence_length'])
-        X = X.reshape((X.shape[0], X.shape[1], 1))
-        
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, shuffle=False
-        )
-        
-        # Build model
-        model = Sequential([
-            LSTM(self.lstm_config['lstm_units'][0], return_sequences=True, 
-                 input_shape=(self.lstm_config['sequence_length'], 1)),
-            Dropout(self.lstm_config['dropout_rate']),
-            BatchNormalization(),
+            self.is_trained = True
+            self.last_trained = datetime.utcnow()
             
-            LSTM(self.lstm_config['lstm_units'][1], return_sequences=True),
-            Dropout(self.lstm_config['dropout_rate']),
-            BatchNormalization(),
+            # Save models
+            self.save_model()
             
-            LSTM(self.lstm_config['lstm_units'][2], return_sequences=False),
-            Dropout(self.lstm_config['dropout_rate']),
-            BatchNormalization(),
+            logger.info("Performance predictor training completed successfully")
             
-            Dense(50, activation='relu'),
-            Dropout(self.lstm_config['dropout_rate']),
-            Dense(1)
-        ])
-        
-        model.compile(
-            optimizer=Adam(learning_rate=self.lstm_config['learning_rate']),
-            loss='mse',
-            metrics=['mae']
-        )
-        
-        # Callbacks
-        callbacks = [
-            EarlyStopping(patience=10, restore_best_weights=True),
-            ReduceLROnPlateau(patience=5, factor=0.5)
-        ]
-        
-        # Train model
-        model.fit(
-            X_train, y_train,
-            batch_size=self.lstm_config['batch_size'],
-            epochs=self.lstm_config['epochs'],
-            validation_data=(X_test, y_test),
-            callbacks=callbacks,
-            verbose=0
-        )
-        
-        # Store scaler for later use
-        self.scalers[f'{target_metric}_lstm'] = scaler
-        
-        return model
-
-    def train_lightgbm_model(self, data: pd.DataFrame, target_metric: str) -> lgb.LGBMRegressor:
-        """Train LightGBM model for time series forecasting."""
-        feature_cols = [col for col in data.columns if col != target_metric and not col.startswith('target')]
-        X = data[feature_cols].fillna(0)
-        y = data[target_metric]
-        
-        # Remove rows with missing target
-        mask = ~y.isna()
-        X, y = X[mask], y[mask]
-        
-        # Time series split
-        tscv = TimeSeriesSplit(n_splits=5)
-        
-        model = lgb.LGBMRegressor(
-            n_estimators=1000,
-            learning_rate=0.05,
-            max_depth=8,
-            num_leaves=31,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=42,
-            objective='regression',
-            metric='rmse',
-            verbosity=-1
-        )
-        
-        # Train with time series validation
-        for train_idx, val_idx in tscv.split(X):
-            X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-            y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            return {
+                'success': True,
+                'metrics_trained': list(training_results.keys()),
+                'results': training_results,
+                'feature_count': len(self.feature_columns),
+                'training_samples': len(df)
+            }
             
-            model.fit(
-                X_train, y_train,
-                eval_set=[(X_val, y_val)],
-                callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)]
+        except Exception as e:
+            logger.error(f"Error training performance predictor: {e}")
+            raise
+    
+    def predict(self, historical_data: List[Dict], prediction_days: int = 30, 
+                metrics: List[str] = None) -> Dict[str, List[float]]:
+        """
+        Predict future performance metrics
+        """
+        try:
+            if not self.is_trained and not self.load_model():
+                raise ValueError("Model not trained. Please train the model first.")
+            
+            if metrics is None:
+                metrics = list(self.models.keys())
+            
+            # Prepare features from historical data
+            df = self.prepare_features(historical_data)
+            
+            if df.empty:
+                raise ValueError("No valid historical data provided")
+            
+            predictions = {}
+            
+            for metric in metrics:
+                if metric not in self.models:
+                    logger.warning(f"No trained model found for metric: {metric}")
+                    continue
+                
+                # Get the last known values for generating future predictions
+                last_row = df.iloc[-1:][self.feature_columns].values
+                
+                # Scale features
+                scaler = self.scalers[metric]
+                last_row_scaled = scaler.transform(last_row)
+                
+                # Generate predictions using ensemble of models
+                metric_models = self.models[metric]
+                ensemble_predictions = []
+                
+                for model_name, model in metric_models.items():
+                    model_predictions = []
+                    current_features = last_row_scaled.copy()
+                    
+                    for day in range(prediction_days):
+                        pred = model.predict(current_features)[0]
+                        model_predictions.append(max(0, pred))  # Ensure non-negative predictions
+                        
+                        # Update features for next prediction (simple approach)
+                        # In practice, you'd want more sophisticated feature updating
+                        current_features = current_features.copy()
+                    
+                    ensemble_predictions.append(model_predictions)
+                
+                # Average ensemble predictions
+                predictions[metric] = np.mean(ensemble_predictions, axis=0).tolist()
+            
+            return predictions
+            
+        except Exception as e:
+            logger.error(f"Error making predictions: {e}")
+            raise
+    
+    def predict_with_prophet(self, historical_data: List[Dict], 
+                           metric: str, prediction_days: int = 30) -> Dict[str, Any]:
+        """
+        Use Facebook Prophet for time series prediction (alternative method)
+        """
+        try:
+            df = pd.DataFrame(historical_data)
+            df['date'] = pd.to_datetime(df['date'])
+            
+            if metric not in df.columns:
+                raise ValueError(f"Metric {metric} not found in data")
+            
+            # Prepare data for Prophet
+            prophet_df = df[['date', metric]].rename(columns={'date': 'ds', metric: 'y'})
+            prophet_df = prophet_df.dropna()
+            
+            # Create and fit Prophet model
+            model = Prophet(
+                daily_seasonality=True,
+                weekly_seasonality=True,
+                yearly_seasonality=False,
+                changepoint_prior_scale=0.05
             )
-        
-        # Store feature importance
-        self.feature_importance[f'{target_metric}_lightgbm'] = dict(
-            zip(feature_cols, model.feature_importances_)
-        )
-        
-        return model
-
-    def train_arima_model(self, data: pd.DataFrame, target_metric: str) -> ARIMA:
-        """Train ARIMA model for time series forecasting."""
-        series = data[target_metric].dropna()
-        
-        # Check stationarity
-        adf_result = adfuller(series)
-        
-        # Difference the series if not stationary
-        if adf_result[1] > 0.05:
-            series = series.diff().dropna()
-        
-        # Auto ARIMA parameter selection (simplified)
-        best_aic = float('inf')
-        best_order = (1, 1, 1)
-        
-        for p in range(3):
-            for d in range(2):
-                for q in range(3):
-                    try:
-                        model = ARIMA(series, order=(p, d, q))
-                        fitted_model = model.fit()
-                        if fitted_model.aic < best_aic:
-                            best_aic = fitted_model.aic
-                            best_order = (p, d, q)
-                    except:
-                        continue
-        
-        # Train final model
-        model = ARIMA(series, order=best_order)
-        fitted_model = model.fit()
-        
-        return fitted_model
-
-    def train(self, data: pd.DataFrame, target_metrics: List[str]) -> Dict[str, Any]:
-        """
-        Train the performance prediction models.
-        
-        Args:
-            data: Training data with time series
-            target_metrics: List of metrics to predict
             
-        Returns:
-            Training results and model performance
-        """
-        logger.info(f"Training {self.model_type} models for {len(target_metrics)} metrics")
-        
-        # Prepare features
-        processed_data = self.prepare_features(data)
-        
-        training_results = {}
-        
-        for metric in target_metrics:
-            if metric not in processed_data.columns:
-                logger.warning(f"Metric {metric} not found in data, skipping")
-                continue
+            model.fit(prophet_df)
             
-            metric_results = {}
+            # Make future predictions
+            future = model.make_future_dataframe(periods=prediction_days)
+            forecast = model.predict(future)
             
-            try:
-                if self.model_type in ['prophet', 'ensemble']:
-                    prophet_model = self.train_prophet_model(processed_data, metric)
-                    self.models[f'{metric}_prophet'] = prophet_model
-                    metric_results['prophet'] = 'trained'
-                
-                if self.model_type in ['lstm', 'ensemble']:
-                    lstm_model = self.train_lstm_model(processed_data, metric)
-                    self.models[f'{metric}_lstm'] = lstm_model
-                    metric_results['lstm'] = 'trained'
-                
-                if self.model_type in ['lightgbm', 'ensemble']:
-                    lgb_model = self.train_lightgbm_model(processed_data, metric)
-                    self.models[f'{metric}_lightgbm'] = lgb_model
-                    metric_results['lightgbm'] = 'trained'
-                
-                if self.model_type in ['arima', 'ensemble']:
-                    arima_model = self.train_arima_model(processed_data, metric)
-                    self.models[f'{metric}_arima'] = arima_model
-                    metric_results['arima'] = 'trained'
-                
-                training_results[metric] = metric_results
-                
-            except Exception as e:
-                logger.error(f"Error training models for {metric}: {str(e)}")
-                training_results[metric] = {'error': str(e)}
-        
-        self.is_trained = True
-        logger.info("Model training completed")
-        
-        return training_results
-
-    def predict(self, data: pd.DataFrame, campaign_id: str, prediction_days: int) -> Dict[str, Any]:
-        """
-        Generate predictions for campaign performance.
-        
-        Args:
-            data: Historical data for prediction
-            campaign_id: Campaign identifier
-            prediction_days: Number of days to predict
+            # Extract predictions for future dates only
+            future_predictions = forecast.tail(prediction_days)
             
-        Returns:
-            Predictions with confidence intervals
-        """
-        if not self.is_trained:
-            raise ValueError("Models must be trained before making predictions")
-        
-        # Prepare features
-        processed_data = self.prepare_features(data)
-        
-        # Generate future dates
-        last_date = processed_data.index.max()
-        future_dates = pd.date_range(
-            start=last_date + timedelta(days=1),
-            periods=prediction_days,
-            freq='D'
-        )
-        
-        predictions = {}
-        
-        for metric in ['spend', 'clicks', 'conversions', 'impressions']:
-            if f'{metric}_prophet' not in self.models:
-                continue
-            
-            metric_predictions = []
-            
-            # Prophet predictions
-            if f'{metric}_prophet' in self.models:
-                prophet_model = self.models[f'{metric}_prophet']
-                future_df = prophet_model.make_future_dataframe(periods=prediction_days)
-                prophet_forecast = prophet_model.predict(future_df)
-                prophet_pred = prophet_forecast[['yhat', 'yhat_lower', 'yhat_upper']].tail(prediction_days)
-                metric_predictions.append(('prophet', prophet_pred['yhat'].values))
-            
-            # Ensemble prediction
-            if self.model_type == 'ensemble' and len(metric_predictions) > 1:
-                ensemble_pred = np.zeros(prediction_days)
-                for model_name, pred in metric_predictions:
-                    weight = self.ensemble_weights.get(model_name, 0.25)
-                    ensemble_pred += weight * pred
-                
-                predictions[metric] = {
-                    'values': ensemble_pred.tolist(),
-                    'dates': future_dates.tolist(),
-                    'confidence_lower': (ensemble_pred * 0.9).tolist(),
-                    'confidence_upper': (ensemble_pred * 1.1).tolist(),
-                    'model_type': 'ensemble'
-                }
-            elif len(metric_predictions) > 0:
-                pred_values = metric_predictions[0][1]
-                predictions[metric] = {
-                    'values': pred_values.tolist(),
-                    'dates': future_dates.tolist(),
-                    'confidence_lower': (pred_values * 0.9).tolist(),
-                    'confidence_upper': (pred_values * 1.1).tolist(),
-                    'model_type': metric_predictions[0][0]
-                }
-        
-        return {
-            'campaign_id': campaign_id,
-            'predictions': predictions,
-            'prediction_horizon': prediction_days,
-            'generated_at': datetime.utcnow().isoformat()
-        }
-
-    def calculate_confidence_intervals(self, predictions: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate confidence intervals for predictions."""
-        confidence_intervals = {}
-        
-        for metric, pred_data in predictions.get('predictions', {}).items():
-            values = np.array(pred_data['values'])
-            
-            # Calculate percentile-based confidence intervals
-            confidence_intervals[metric] = {
-                'ci_95_lower': np.percentile(values, 2.5).tolist(),
-                'ci_95_upper': np.percentile(values, 97.5).tolist(),
-                'ci_80_lower': np.percentile(values, 10).tolist(),
-                'ci_80_upper': np.percentile(values, 90).tolist(),
-                'median': np.median(values).tolist(),
-                'std': np.std(values).tolist()
+            return {
+                'predictions': future_predictions['yhat'].tolist(),
+                'lower_bound': future_predictions['yhat_lower'].tolist(),
+                'upper_bound': future_predictions['yhat_upper'].tolist(),
+                'dates': future_predictions['ds'].dt.strftime('%Y-%m-%d').tolist()
             }
-        
-        return confidence_intervals
-
-    def save_models(self, filepath: str) -> None:
-        """Save trained models to disk."""
-        model_data = {
-            'models': self.models,
-            'scalers': self.scalers,
-            'feature_importance': self.feature_importance,
-            'model_type': self.model_type,
-            'is_trained': self.is_trained,
-            'config': {
-                'prophet_config': self.prophet_config,
-                'lstm_config': self.lstm_config,
-                'ensemble_weights': self.ensemble_weights
+            
+        except Exception as e:
+            logger.error(f"Error with Prophet prediction: {e}")
+            raise
+    
+    def calculate_confidence_intervals(self, predictions: Dict[str, List[float]], 
+                                     confidence_level: float = 0.95) -> Dict[str, Dict[str, List[float]]]:
+        """
+        Calculate confidence intervals for predictions
+        """
+        try:
+            confidence_intervals = {}
+            z_score = 1.96 if confidence_level == 0.95 else 2.576  # 95% or 99%
+            
+            for metric, preds in predictions.items():
+                if metric not in self.accuracy_metrics:
+                    continue
+                
+                # Use historical error to estimate uncertainty
+                mse = self.accuracy_metrics[metric]['mse']
+                std_error = np.sqrt(mse)
+                
+                lower_bound = [max(0, p - z_score * std_error) for p in preds]
+                upper_bound = [p + z_score * std_error for p in preds]
+                
+                confidence_intervals[metric] = {
+                    'lower_bound': lower_bound,
+                    'upper_bound': upper_bound,
+                    'confidence_level': confidence_level
+                }
+            
+            return confidence_intervals
+            
+        except Exception as e:
+            logger.error(f"Error calculating confidence intervals: {e}")
+            return {}
+    
+    def save_model(self) -> bool:
+        """
+        Save the trained model to disk
+        """
+        try:
+            model_data = {
+                'models': self.models,
+                'scalers': self.scalers,
+                'feature_columns': self.feature_columns,
+                'target_metrics': self.target_metrics,
+                'model_version': self.model_version,
+                'last_trained': self.last_trained,
+                'accuracy_metrics': self.accuracy_metrics,
+                'is_trained': self.is_trained
             }
-        }
-        
-        joblib.dump(model_data, filepath)
-        logger.info(f"Models saved to {filepath}")
+            
+            model_file = os.path.join(self.model_path, 'performance_predictor.pkl')
+            with open(model_file, 'wb') as f:
+                pickle.dump(model_data, f)
+            
+            logger.info(f"Model saved successfully to {model_file}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error saving model: {e}")
+            return False
+    
+    def load_model(self) -> bool:
+        """
+        Load a trained model from disk
+        """
+        try:
+            model_file = os.path.join(self.model_path, 'performance_predictor.pkl')
+            
+            if not os.path.exists(model_file):
+                logger.warning(f"Model file not found: {model_file}")
+                return False
+            
+            with open(model_file, 'rb') as f:
+                model_data = pickle.load(f)
+            
+            self.models = model_data['models']
+            self.scalers = model_data['scalers']
+            self.feature_columns = model_data['feature_columns']
+            self.target_metrics = model_data['target_metrics']
+            self.model_version = model_data.get('model_version', '1.0.0')
+            self.last_trained = model_data.get('last_trained')
+            self.accuracy_metrics = model_data.get('accuracy_metrics', {})
+            self.is_trained = model_data.get('is_trained', True)
+            
+            logger.info(f"Model loaded successfully from {model_file}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            return False
+    
+    def is_loaded(self) -> bool:
+        """Check if model is loaded"""
+        return self.is_trained and bool(self.models)
+    
+    def get_version(self) -> str:
+        """Get model version"""
+        return self.model_version
+    
+    def get_last_trained_date(self) -> Optional[str]:
+        """Get last training date"""
+        return self.last_trained.isoformat() if self.last_trained else None
+    
+    def get_accuracy_metrics(self) -> Dict[str, Any]:
+        """Get model accuracy metrics"""
+        return self.accuracy_metrics
+    
+    def get_feature_importance(self, metric: str, model_type: str = None) -> Dict[str, float]:
+        """
+        Get feature importance for a specific metric
+        """
+        try:
+            if metric not in self.models:
+                return {}
+            
+            models = self.models[metric]
+            
+            if model_type and model_type in models:
+                model = models[model_type]
+            else:
+                # Use the best performing model
+                best_model_name = self.accuracy_metrics[metric]['best_model']
+                model = models[best_model_name]
+            
+            if hasattr(model, 'feature_importances_'):
+                importance_dict = dict(zip(self.feature_columns, model.feature_importances_))
+                # Sort by importance
+                return dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True))
+            
+            return {}
+            
+        except Exception as e:
+            logger.error(f"Error getting feature importance: {e}")
+            return {}
 
-    def load_models(self, filepath: str) -> None:
-        """Load trained models from disk."""
-        model_data = joblib.load(filepath)
-        
-        self.models = model_data['models']
-        self.scalers = model_data['scalers']
-        self.feature_importance = model_data['feature_importance']
-        self.model_type = model_data['model_type']
-        self.is_trained = model_data['is_trained']
-        
-        if 'config' in model_data:
-            self.prophet_config = model_data['config']['prophet_config']
-            self.lstm_config = model_data['config']['lstm_config']
-            self.ensemble_weights = model_data['config']['ensemble_weights']
-        
-        logger.info(f"Models loaded from {filepath}")
-
-    def get_feature_importance(self, metric: str) -> Dict[str, float]:
-        """Get feature importance for a specific metric."""
-        return self.feature_importance.get(f'{metric}_lightgbm', {})
+if __name__ == "__main__":
+    # Example usage
+    predictor = PerformancePredictor()
+    
+    # Mock training data
+    training_data = [
+        {
+            'date': '2024-01-01',
+            'spend': 100.0,
+            'clicks': 50,
+            'impressions': 1000,
+            'conversions': 5,
+            'platform': 'GOOGLE_ADS'
+        },
+        # Add more training data...
+    ]
+    
+    # Train the model
+    # result = predictor.train(training_data)
+    # print(f"Training result: {result}")
+    
+    # Make predictions
+    # predictions = predictor.predict(training_data, prediction_days=7)
+    # print(f"Predictions: {predictions}")

@@ -1,4 +1,3 @@
-// frontend/src/pages/Dashboard/index.tsx
 import React, { useState, useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -15,12 +14,14 @@ import {
   CalendarIcon,
   FunnelIcon,
   ArrowPathIcon,
-  DocumentArrowDownIcon
+  DocumentArrowDownIcon,
+  Cog6ToothIcon,
+  PlusIcon
 } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
 
 // Components
-import MetricCard from '../../components/dashboard/MetricCard';
+import MetricCard, { MetricCardsGrid, MetricCardSkeleton } from '../../components/dashboard/MetricCard';
 import PerformanceChart from '../../components/charts/PerformanceChart';
 import PlatformComparison from '../../components/charts/PlatformComparison';
 import CampaignTable from '../../components/campaigns/CampaignTable';
@@ -33,7 +34,7 @@ import AlertsList from '../../components/alerts/AlertsList';
 
 // Hooks and Services
 import { useRealTimeMetrics } from '../../hooks/useRealTimeMetrics';
-import { useDashboard } from '../../hooks/useDashboard';
+import { useAuth } from '../../hooks/useAuth';
 import { apiService } from '../../services/api.service';
 
 // Types
@@ -45,6 +46,9 @@ import { formatCurrency, formatNumber, formatPercentage } from '../../utils/form
 import { calculatePercentageChange, getTrendDirection } from '../../utils/calculations';
 
 const Dashboard: React.FC = () => {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+
   // State
   const [dateRange, setDateRange] = useState<DateRange>({
     startDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // Last 30 days
@@ -57,154 +61,142 @@ const Dashboard: React.FC = () => {
     'INSTAGRAM_ADS'
   ]);
 
+  const [selectedMetrics, setSelectedMetrics] = useState<string[]>([
+    'spend', 'clicks', 'conversions', 'ctr'
+  ]);
+
   const [isExporting, setIsExporting] = useState(false);
   const [refreshInterval, setRefreshInterval] = useState<number>(300000); // 5 minutes
-
-  const queryClient = useQueryClient();
-
-  // Custom hooks
-  const { preferences, updatePreferences } = useDashboard();
+  const [showInsights, setShowInsights] = useState(true);
 
   // Real-time metrics
-  const realTimeMetrics = useRealTimeMetrics({
+  const {
+    metrics: realTimeMetrics,
+    connectionStatus,
+    getCampaignMetrics,
+    getAggregatedMetrics,
+    refresh: refreshRealTime,
+    isConnected: isRealTimeConnected
+  } = useRealTimeMetrics({
     enabled: true,
     platforms: selectedPlatforms,
-    interval: refreshInterval
+    updateInterval: refreshInterval
   });
+
+  // Query parameters
+  const queryParams = useMemo(() => ({
+    startDate: dateRange.startDate.toISOString(),
+    endDate: dateRange.endDate.toISOString(),
+    platforms: selectedPlatforms.join(',')
+  }), [dateRange, selectedPlatforms]);
 
   // Fetch dashboard overview
   const {
-    data: dashboardData,
-    isLoading: isDashboardLoading,
-    error: dashboardError,
-    refetch: refetchDashboard,
-    isFetching: isDashboardFetching
-  } = useQuery<DashboardOverview>({
-    queryKey: ['dashboard', 'overview', dateRange, selectedPlatforms],
-    queryFn: () => apiService.getDashboardOverview({
-      startDate: dateRange.startDate.toISOString(),
-      endDate: dateRange.endDate.toISOString(),
-      platforms: selectedPlatforms
-    }),
-    staleTime: 5 * 60 * 1000, // 5 minutes
+    data: overview,
+    isLoading: overviewLoading,
+    error: overviewError,
+    refetch: refetchOverview
+  } = useQuery({
+    queryKey: ['dashboard-overview', queryParams],
+    queryFn: () => apiService.getDashboardOverview(queryParams),
     refetchInterval: refreshInterval,
-    refetchIntervalInBackground: true
+    staleTime: 30000, // 30 seconds
+  });
+
+  // Fetch performance chart data
+  const {
+    data: chartData,
+    isLoading: chartLoading,
+    error: chartError
+  } = useQuery({
+    queryKey: ['performance-chart', queryParams, selectedMetrics],
+    queryFn: () => apiService.getPerformanceChart({
+      ...queryParams,
+      metrics: selectedMetrics.join(','),
+      groupBy: 'day'
+    }),
+    enabled: selectedMetrics.length > 0,
+    staleTime: 60000, // 1 minute
+  });
+
+  // Fetch platform comparison
+  const {
+    data: platformData,
+    isLoading: platformLoading
+  } = useQuery({
+    queryKey: ['platform-comparison', queryParams],
+    queryFn: () => apiService.getPlatformComparison({
+      ...queryParams,
+      metric: 'spend'
+    }),
+    staleTime: 120000, // 2 minutes
+  });
+
+  // Fetch top campaigns
+  const {
+    data: topCampaigns,
+    isLoading: campaignsLoading
+  } = useQuery({
+    queryKey: ['top-campaigns', queryParams],
+    queryFn: () => apiService.getTopCampaigns({
+      ...queryParams,
+      metric: 'roas',
+      limit: 10
+    }),
+    staleTime: 120000, // 2 minutes
   });
 
   // Fetch AI insights
   const {
     data: aiInsights,
-    isLoading: isInsightsLoading,
-    refetch: refetchInsights
+    isLoading: insightsLoading
   } = useQuery({
-    queryKey: ['ai-insights', dateRange],
-    queryFn: () => apiService.getAIInsights({
-      startDate: dateRange.startDate.toISOString(),
-      endDate: dateRange.endDate.toISOString()
-    }),
-    staleTime: 15 * 60 * 1000, // 15 minutes
-    enabled: !!dashboardData // Only fetch after dashboard data is loaded
+    queryKey: ['ai-insights', queryParams],
+    queryFn: () => apiService.getAIInsights(queryParams),
+    enabled: showInsights,
+    staleTime: 300000, // 5 minutes
   });
 
-  // Memoized calculations
-  const metrics = useMemo(() => {
-    if (!dashboardData) return null;
-
-    const current = dashboardData.summary.current;
-    const previous = dashboardData.summary.previous;
-
-    return {
-      spend: {
-        current: current.totalSpend,
-        previous: previous.totalSpend,
-        change: calculatePercentageChange(current.totalSpend, previous.totalSpend),
-        trend: getTrendDirection(current.totalSpend, previous.totalSpend)
-      },
-      clicks: {
-        current: current.totalClicks,
-        previous: previous.totalClicks,
-        change: calculatePercentageChange(current.totalClicks, previous.totalClicks),
-        trend: getTrendDirection(current.totalClicks, previous.totalClicks)
-      },
-      conversions: {
-        current: current.totalConversions,
-        previous: previous.totalConversions,
-        change: calculatePercentageChange(current.totalConversions, previous.totalConversions),
-        trend: getTrendDirection(current.totalConversions, previous.totalConversions)
-      },
-      roas: {
-        current: current.averageROAS,
-        previous: previous.averageROAS,
-        change: calculatePercentageChange(current.averageROAS, previous.averageROAS),
-        trend: getTrendDirection(current.averageROAS, previous.averageROAS)
-      },
-      cpc: {
-        current: current.averageCPC,
-        previous: previous.averageCPC,
-        change: calculatePercentageChange(current.averageCPC, previous.averageCPC),
-        trend: getTrendDirection(previous.averageCPC, current.averageCPC) // Inverted - lower CPC is better
-      },
-      ctr: {
-        current: current.averageCTR,
-        previous: previous.averageCTR,
-        change: calculatePercentageChange(current.averageCTR, previous.averageCTR),
-        trend: getTrendDirection(current.averageCTR, previous.averageCTR)
-      }
-    };
-  }, [dashboardData]);
-
   // Handle date range change
-  const handleDateRangeChange = (newDateRange: DateRange) => {
-    setDateRange(newDateRange);
-    // Update user preferences
-    updatePreferences({ defaultDateRange: newDateRange });
+  const handleDateRangeChange = (newRange: DateRange) => {
+    setDateRange(newRange);
+    // Invalidate related queries
+    queryClient.invalidateQueries({ queryKey: ['dashboard-overview'] });
+    queryClient.invalidateQueries({ queryKey: ['performance-chart'] });
+    queryClient.invalidateQueries({ queryKey: ['platform-comparison'] });
   };
 
   // Handle platform filter change
   const handlePlatformChange = (platforms: Platform[]) => {
     setSelectedPlatforms(platforms);
-    updatePreferences({ selectedPlatforms: platforms });
+  };
+
+  // Handle metrics selection change
+  const handleMetricsChange = (metrics: string[]) => {
+    setSelectedMetrics(metrics);
   };
 
   // Handle manual refresh
   const handleRefresh = async () => {
     try {
       await Promise.all([
-        refetchDashboard(),
-        refetchInsights()
+        refetchOverview(),
+        refreshRealTime(),
+        queryClient.invalidateQueries({ queryKey: ['performance-chart'] }),
+        queryClient.invalidateQueries({ queryKey: ['platform-comparison'] }),
+        queryClient.invalidateQueries({ queryKey: ['top-campaigns'] })
       ]);
-      toast.success('Dashboard refreshed successfully');
+      toast.success('Dashboard refreshed');
     } catch (error) {
       toast.error('Failed to refresh dashboard');
     }
   };
 
   // Handle export
-  const handleExport = async (format: 'csv' | 'json' = 'csv') => {
+  const handleExport = async () => {
     try {
       setIsExporting(true);
-      
-      const response = await apiService.exportDashboardData({
-        startDate: dateRange.startDate.toISOString(),
-        endDate: dateRange.endDate.toISOString(),
-        platforms: selectedPlatforms,
-        format
-      });
-
-      // Create download link
-      const blob = new Blob([response], { 
-        type: format === 'csv' ? 'text/csv' : 'application/json' 
-      });
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `admetrics-dashboard-${new Date().toISOString().split('T')[0]}.${format}`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
-
-      toast.success('Data exported successfully');
+      await apiService.exportData('/dashboard/export', queryParams, 'dashboard-report.csv');
     } catch (error) {
       toast.error('Failed to export data');
     } finally {
@@ -212,44 +204,22 @@ const Dashboard: React.FC = () => {
     }
   };
 
-  // Auto-refresh when real-time data updates
+  // Auto-refresh effect
   useEffect(() => {
-    if (realTimeMetrics) {
-      queryClient.setQueryData(
-        ['dashboard', 'overview', dateRange, selectedPlatforms],
-        (oldData: DashboardOverview | undefined) => {
-          if (!oldData) return oldData;
-          
-          return {
-            ...oldData,
-            summary: {
-              ...oldData.summary,
-              current: {
-                ...oldData.summary.current,
-                ...realTimeMetrics
-              }
-            }
-          };
-        }
-      );
-    }
-  }, [realTimeMetrics, queryClient, dateRange, selectedPlatforms]);
+    const interval = setInterval(handleRefresh, refreshInterval);
+    return () => clearInterval(interval);
+  }, [refreshInterval]);
 
-  if (isDashboardLoading) {
+  // Error handling
+  if (overviewError) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <LoadingSpinner size="lg" />
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 p-6">
+        <ErrorAlert 
+          title="Failed to load dashboard"
+          message="There was an error loading your dashboard data. Please try again."
+          onRetry={handleRefresh}
+        />
       </div>
-    );
-  }
-
-  if (dashboardError) {
-    return (
-      <ErrorAlert
-        title="Failed to load dashboard"
-        message="There was an error loading your dashboard data."
-        onRetry={refetchDashboard}
-      />
     );
   }
 
@@ -257,223 +227,256 @@ const Dashboard: React.FC = () => {
     <>
       <Helmet>
         <title>Dashboard - AdMetrics AI</title>
-        <meta name="description" content="AdMetrics AI Dashboard - Monitor and optimize your advertising campaigns with AI-powered insights" />
+        <meta name="description" content="AI-powered advertising analytics dashboard" />
       </Helmet>
 
-      <div className="min-h-screen bg-gray-50">
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
         {/* Header */}
-        <div className="bg-white shadow-sm border-b border-gray-200">
+        <div className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex justify-between items-center py-6">
-              <div>
-                <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-                <p className="text-sm text-gray-500 mt-1">
-                  Monitor your advertising campaign performance
-                </p>
+            <div className="flex items-center justify-between h-16">
+              <div className="flex items-center space-x-4">
+                <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
+                  Dashboard
+                </h1>
+                
+                {/* Real-time status indicator */}
+                <div className="flex items-center space-x-2">
+                  <div className={`w-2 h-2 rounded-full ${
+                    isRealTimeConnected ? 'bg-green-500' : 'bg-red-500'
+                  }`} />
+                  <span className="text-sm text-gray-500 dark:text-gray-400">
+                    {isRealTimeConnected ? 'Live' : 'Disconnected'}
+                  </span>
+                </div>
               </div>
 
               <div className="flex items-center space-x-4">
-                {/* Refresh Button */}
-                <button
-                  onClick={handleRefresh}
-                  disabled={isDashboardFetching}
-                  className="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
-                >
-                  <ArrowPathIcon 
-                    className={`h-4 w-4 mr-2 ${isDashboardFetching ? 'animate-spin' : ''}`} 
-                  />
-                  Refresh
-                </button>
-
-                {/* Export Button */}
-                <button
-                  onClick={() => handleExport('csv')}
-                  disabled={isExporting}
-                  className="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
-                >
-                  <DocumentArrowDownIcon className="h-4 w-4 mr-2" />
-                  {isExporting ? 'Exporting...' : 'Export'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Filters */}
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
-            <div className="flex flex-wrap items-center gap-4">
-              <div className="flex items-center space-x-2">
-                <CalendarIcon className="h-5 w-5 text-gray-500" />
+                {/* Date Range Picker */}
                 <DateRangePicker
                   startDate={dateRange.startDate}
                   endDate={dateRange.endDate}
                   onChange={handleDateRangeChange}
                 />
-              </div>
 
-              <div className="flex items-center space-x-2">
-                <FunnelIcon className="h-5 w-5 text-gray-500" />
+                {/* Platform Filter */}
                 <PlatformFilter
                   selectedPlatforms={selectedPlatforms}
                   onChange={handlePlatformChange}
                 />
-              </div>
 
-              {realTimeMetrics && (
-                <div className="ml-auto flex items-center space-x-2 text-sm text-gray-500">
-                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                  <span>Live data</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Alerts */}
-          {dashboardData && dashboardData.alerts.total > 0 && (
-            <div className="mb-6">
-              <AlertsList 
-                alerts={dashboardData.alerts.recent} 
-                showAll={false}
-              />
-            </div>
-          )}
-
-          {/* Key Metrics */}
-          {metrics && (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-              <MetricCard
-                title="Total Spend"
-                value={formatCurrency(metrics.spend.current)}
-                change={metrics.spend.change}
-                trend={metrics.spend.trend}
-                icon={CurrencyDollarIcon}
-                color="blue"
-              />
-              
-              <MetricCard
-                title="Total Clicks"
-                value={formatNumber(metrics.clicks.current)}
-                change={metrics.clicks.change}
-                trend={metrics.clicks.trend}
-                icon={CursorArrowRaysIcon}
-                color="green"
-              />
-              
-              <MetricCard
-                title="Conversions"
-                value={formatNumber(metrics.conversions.current)}
-                change={metrics.conversions.change}
-                trend={metrics.conversions.trend}
-                icon={ChartBarIcon}
-                color="purple"
-              />
-              
-              <MetricCard
-                title="ROAS"
-                value={`${metrics.roas.current.toFixed(2)}x`}
-                change={metrics.roas.change}
-                trend={metrics.roas.trend}
-                icon={ArrowTrendingUpIcon}
-                color="orange"
-              />
-            </div>
-          )}
-
-          {/* Charts Row */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-            {/* Performance Chart */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <h3 className="text-lg font-medium text-gray-900 mb-4">Performance Trends</h3>
-              {dashboardData ? (
-                <PerformanceChart 
-                  data={dashboardData.performance.data}
-                  loading={isDashboardFetching}
-                />
-              ) : (
-                <div className="h-64 flex items-center justify-center">
-                  <LoadingSpinner />
-                </div>
-              )}
-            </div>
-
-            {/* Platform Comparison */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <h3 className="text-lg font-medium text-gray-900 mb-4">Platform Performance</h3>
-              {dashboardData ? (
-                <PlatformComparison 
-                  data={dashboardData.platforms}
-                  loading={isDashboardFetching}
-                />
-              ) : (
-                <div className="h-64 flex items-center justify-center">
-                  <LoadingSpinner />
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Content Row */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Top Campaigns */}
-            <div className="lg:col-span-2">
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="text-lg font-medium text-gray-900">Top Performing Campaigns</h3>
-                  <button className="text-sm text-blue-600 hover:text-blue-700 font-medium">
-                    View All
+                {/* Action buttons */}
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={handleRefresh}
+                    className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+                    title="Refresh"
+                  >
+                    <ArrowPathIcon className="h-5 w-5" />
                   </button>
-                </div>
-                {dashboardData ? (
-                  <CampaignTable 
-                    campaigns={dashboardData.topCampaigns}
-                    loading={isDashboardFetching}
-                    compact={true}
-                  />
-                ) : (
-                  <div className="h-64 flex items-center justify-center">
-                    <LoadingSpinner />
-                  </div>
-                )}
-              </div>
-            </div>
 
-            {/* AI Insights */}
-            <div className="space-y-6">
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center space-x-2">
-                    <LightBulbIcon className="h-5 w-5 text-yellow-500" />
-                    <h3 className="text-lg font-medium text-gray-900">AI Insights</h3>
-                  </div>
-                  <button className="text-sm text-blue-600 hover:text-blue-700 font-medium">
-                    View All
-                  </button>
-                </div>
-                
-                <div className="space-y-4">
-                  {isInsightsLoading ? (
-                    <div className="h-32 flex items-center justify-center">
+                  <button
+                    onClick={handleExport}
+                    disabled={isExporting}
+                    className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50"
+                    title="Export"
+                  >
+                    {isExporting ? (
                       <LoadingSpinner size="sm" />
+                    ) : (
+                      <DocumentArrowDownIcon className="h-5 w-5" />
+                    )}
+                  </button>
+
+                  <button
+                    className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+                    title="Settings"
+                  >
+                    <Cog6ToothIcon className="h-5 w-5" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Main Content */}
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          {/* Overview Metrics */}
+          <section className="mb-8">
+            <div className="mb-6">
+              <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-2">
+                Performance Overview
+              </h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Key metrics from {dateRange.startDate.toLocaleDateString()} to {dateRange.endDate.toLocaleDateString()}
+              </p>
+            </div>
+
+            {overviewLoading ? (
+              <MetricCardsGrid columns={4}>
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <MetricCardSkeleton key={i} />
+                ))}
+              </MetricCardsGrid>
+            ) : (
+              <MetricCardsGrid columns={4}>
+                <MetricCard
+                  title="Total Spend"
+                  value={overview?.summary?.totalSpend || 0}
+                  previousValue={overview?.summary?.trends?.spendTrend}
+                  format="currency"
+                  icon={<CurrencyDollarIcon className="h-6 w-6" />}
+                  color="blue"
+                />
+                
+                <MetricCard
+                  title="Total Clicks"
+                  value={overview?.summary?.totalClicks || 0}
+                  previousValue={overview?.summary?.trends?.clicksTrend}
+                  format="number"
+                  icon={<CursorArrowRaysIcon className="h-6 w-6" />}
+                  color="green"
+                />
+                
+                <MetricCard
+                  title="Conversions"
+                  value={overview?.summary?.totalConversions || 0}
+                  previousValue={overview?.summary?.trends?.conversionsTrend}
+                  format="number"
+                  icon={<ArrowTrendingUpIcon className="h-6 w-6" />}
+                  color="purple"
+                />
+                
+                <MetricCard
+                  title="ROAS"
+                  value={overview?.summary?.averageROAS || 0}
+                  previousValue={overview?.summary?.trends?.roasTrend}
+                  format="number"
+                  icon={<ChartBarIcon className="h-6 w-6" />}
+                  color="indigo"
+                  description="Return on Ad Spend"
+                />
+              </MetricCardsGrid>
+            )}
+          </section>
+
+          {/* Charts Section */}
+          <section className="mb-8">
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+              {/* Performance Chart */}
+              <div className="xl:col-span-2">
+                <PerformanceChart
+                  data={chartData?.chartData || []}
+                  metrics={selectedMetrics}
+                  title="Performance Trends"
+                  loading={chartLoading}
+                  height={400}
+                  showBrush={true}
+                  timeRange="day"
+                />
+              </div>
+
+              {/* Platform Comparison */}
+              <div>
+                <PlatformComparison
+                  data={platformData?.comparison || []}
+                  metric="spend"
+                  title="Platform Performance"
+                  loading={platformLoading}
+                  height={400}
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* AI Insights & Alerts */}
+          {showInsights && (
+            <section className="mb-8">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* AI Insights */}
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+                      AI Insights
+                    </h3>
+                    <LightBulbIcon className="h-5 w-5 text-yellow-500" />
+                  </div>
+                  
+                  {insightsLoading ? (
+                    <div className="space-y-4">
+                      {Array.from({ length: 3 }).map((_, i) => (
+                        <div key={i} className="h-24 bg-gray-200 dark:bg-gray-700 rounded-lg animate-pulse" />
+                      ))}
                     </div>
-                  ) : aiInsights?.insights?.length > 0 ? (
-                    aiInsights.insights.slice(0, 3).map((insight: any) => (
-                      <AIInsightCard 
-                        key={insight.id} 
-                        insight={insight}
-                        compact={true}
-                      />
-                    ))
                   ) : (
-                    <div className="text-center text-gray-500 py-8">
-                      <LightBulbIcon className="h-8 w-8 mx-auto mb-2 text-gray-300" />
-                      <p className="text-sm">No insights available</p>
+                    <div className="space-y-4">
+                      {aiInsights?.slice(0, 3).map((insight: any, index: number) => (
+                        <AIInsightCard
+                          key={insight.id || index}
+                          insight={insight}
+                          onDismiss={() => {
+                            // Handle insight dismissal
+                          }}
+                          onApply={() => {
+                            // Handle insight application
+                          }}
+                        />
+                      ))}
+                      
+                      {!aiInsights?.length && (
+                        <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+                          <LightBulbIcon className="h-12 w-12 mx-auto mb-2 opacity-50" />
+                          <p>No insights available yet</p>
+                          <p className="text-sm">Check back once you have more data</p>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
+
+                {/* Recent Alerts */}
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+                      Recent Alerts
+                    </h3>
+                    <ExclamationTriangleIcon className="h-5 w-5 text-orange-500" />
+                  </div>
+                  
+                  <AlertsList
+                    alerts={overview?.alerts || []}
+                    maxItems={5}
+                    showActions={true}
+                  />
+                </div>
               </div>
+            </section>
+          )}
+
+          {/* Top Campaigns Table */}
+          <section>
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+                Top Performing Campaigns
+              </h3>
+              <button className="flex items-center space-x-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors">
+                <PlusIcon className="h-4 w-4" />
+                <span>New Campaign</span>
+              </button>
             </div>
-          </div>
+
+            <CampaignTable
+              campaigns={topCampaigns?.campaigns || []}
+              loading={campaignsLoading}
+              onCampaignClick={(campaign) => {
+                // Navigate to campaign details
+              }}
+              showActions={true}
+              sortBy="roas"
+              sortOrder="desc"
+            />
+          </section>
         </div>
       </div>
     </>

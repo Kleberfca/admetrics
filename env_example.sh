@@ -1,200 +1,356 @@
-# .env.example - Environment Configuration Template
-# Copy this file to .env and fill in your actual values
+# AdMetrics AI Dashboard - Environment Configuration
+# Copy this file to .env and update with your actual values
 
-# Application
+# =============================================================================
+# GENERAL SETTINGS
+# =============================================================================
 NODE_ENV=development
-PORT=3000
-API_URL=http://localhost:3000
-FRONTEND_URL=http://localhost:3001
+PYTHON_ENV=development
+LOG_LEVEL=info
+ENABLE_METRICS=true
 
-# Database
+# =============================================================================
+# SERVER PORTS
+# =============================================================================
+BACKEND_PORT=3000
+FRONTEND_PORT=3001
+AI_ENGINE_PORT=5000
+HTTP_PORT=80
+HTTPS_PORT=443
+
+# =============================================================================
+# FRONTEND CONFIGURATION
+# =============================================================================
+REACT_APP_API_URL=http://localhost:3000
+REACT_APP_WS_URL=http://localhost:3000
+REACT_APP_ENVIRONMENT=development
+GENERATE_SOURCEMAP=true
+
+# =============================================================================
+# DATABASE CONFIGURATION
+# =============================================================================
+# PostgreSQL Database
 DATABASE_URL=postgresql://postgres:postgres123@localhost:5432/admetrics
-DATABASE_POOL_SIZE=10
+POSTGRES_DB=admetrics
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres123
+POSTGRES_PORT=5432
 
-# Redis Cache
+# Database connection pool settings
+DB_POOL_MIN=2
+DB_POOL_MAX=10
+DB_POOL_ACQUIRE_TIMEOUT=60000
+DB_POOL_IDLE_TIMEOUT=30000
+
+# =============================================================================
+# REDIS CONFIGURATION
+# =============================================================================
 REDIS_URL=redis://localhost:6379
-REDIS_PREFIX=admetrics:
-REDIS_TTL=3600
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=redis123
+REDIS_DB=0
 
-# JWT Authentication
-JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
-JWT_REFRESH_SECRET=your-refresh-secret-key-change-this-in-production
-JWT_EXPIRES_IN=15m
+# =============================================================================
+# AUTHENTICATION & SECURITY
+# =============================================================================
+# JWT Secrets (CHANGE THESE IN PRODUCTION!)
+JWT_SECRET=your-super-secret-jwt-key-change-this-in-production-32-chars-minimum
+JWT_REFRESH_SECRET=your-refresh-secret-key-change-this-in-production-32-chars-minimum
+JWT_EXPIRES_IN=24h
 JWT_REFRESH_EXPIRES_IN=7d
 
-# Encryption
+# Encryption key for sensitive data (32 characters)
 ENCRYPTION_KEY=your-32-character-encryption-key-here
 
-# Email Service (Choose one)
-# Sendgrid
-SENDGRID_API_KEY=your-sendgrid-api-key
-SENDGRID_FROM_EMAIL=noreply@admetrics.ai
+# Session configuration
+SESSION_SECRET=your-session-secret-key-change-this
+SESSION_MAX_AGE=86400000
 
-# Nodemailer SMTP
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=your-email@gmail.com
-SMTP_PASS=your-app-password
-SMTP_FROM=noreply@admetrics.ai
+# Rate limiting
+RATE_LIMIT_MAX_REQUESTS=1000
+API_RATE_LIMIT=5000
+RATE_LIMIT_WINDOW=3600000
 
-# File Upload
-UPLOAD_DIR=uploads
-MAX_FILE_SIZE=10485760
-ALLOWED_FILE_TYPES=jpg,jpeg,png,gif,pdf,csv,xlsx
-
-# Google Ads API
+# =============================================================================
+# GOOGLE ADS API CONFIGURATION
+# =============================================================================
 GOOGLE_ADS_DEVELOPER_TOKEN=your-google-ads-developer-token
 GOOGLE_ADS_CLIENT_ID=your-google-oauth-client-id
 GOOGLE_ADS_CLIENT_SECRET=your-google-oauth-client-secret
+GOOGLE_ADS_REFRESH_TOKEN=your-google-refresh-token
 
-# Facebook Ads API
+# Google Analytics
+GOOGLE_ANALYTICS_PROPERTY_ID=your-ga4-property-id
+
+# =============================================================================
+# FACEBOOK ADS API CONFIGURATION
+# =============================================================================
 FACEBOOK_APP_ID=your-facebook-app-id
 FACEBOOK_APP_SECRET=your-facebook-app-secret
+FACEBOOK_ACCESS_TOKEN=your-long-lived-access-token
+FACEBOOK_VERIFY_TOKEN=your-webhook-verify-token
 
-# TikTok Ads API
+# =============================================================================
+# TIKTOK ADS API CONFIGURATION
+# =============================================================================
 TIKTOK_APP_ID=your-tiktok-app-id
 TIKTOK_APP_SECRET=your-tiktok-app-secret
+TIKTOK_ACCESS_TOKEN=your-tiktok-access-token
 
-# LinkedIn Ads API
+# =============================================================================
+# LINKEDIN ADS API CONFIGURATION
+# =============================================================================
 LINKEDIN_CLIENT_ID=your-linkedin-client-id
 LINKEDIN_CLIENT_SECRET=your-linkedin-client-secret
+LINKEDIN_ACCESS_TOKEN=your-linkedin-access-token
 
-# Twitter Ads API
+# =============================================================================
+# TWITTER ADS API CONFIGURATION
+# =============================================================================
 TWITTER_API_KEY=your-twitter-api-key
 TWITTER_API_SECRET=your-twitter-api-secret
+TWITTER_ACCESS_TOKEN=your-twitter-access-token
+TWITTER_ACCESS_TOKEN_SECRET=your-twitter-access-token-secret
 
-# YouTube Ads API (same as Google Ads)
-YOUTUBE_API_KEY=your-youtube-api-key
-
-# Pinterest Ads API
-PINTEREST_APP_ID=your-pinterest-app-id
-PINTEREST_APP_SECRET=your-pinterest-app-secret
-
-# Snapchat Ads API
+# =============================================================================
+# SNAPCHAT ADS API CONFIGURATION
+# =============================================================================
 SNAPCHAT_CLIENT_ID=your-snapchat-client-id
 SNAPCHAT_CLIENT_SECRET=your-snapchat-client-secret
+SNAPCHAT_ACCESS_TOKEN=your-snapchat-access-token
 
-# AI Engine
-AI_ENGINE_URL=http://localhost:5000
-AI_ENGINE_API_KEY=your-ai-engine-api-key
+# =============================================================================
+# PINTEREST ADS API CONFIGURATION
+# =============================================================================
+PINTEREST_APP_ID=your-pinterest-app-id
+PINTEREST_APP_SECRET=your-pinterest-app-secret
+PINTEREST_ACCESS_TOKEN=your-pinterest-access-token
+
+# =============================================================================
+# AI/ML CONFIGURATION
+# =============================================================================
+# OpenAI API (for advanced AI features)
 OPENAI_API_KEY=your-openai-api-key
-MODEL_STORAGE_PATH=./models
-ENABLE_AI_FEATURES=true
+OPENAI_MODEL=gpt-4
+OPENAI_MAX_TOKENS=2000
 
-# Rate Limiting
-RATE_LIMIT_WINDOW_MS=900000
-RATE_LIMIT_MAX_REQUESTS=1000
-RATE_LIMIT_SKIP_SUCCESSFUL_REQUESTS=false
+# Anthropic Claude API (alternative to OpenAI)
+ANTHROPIC_API_KEY=your-anthropic-api-key
 
-# Logging
-LOG_LEVEL=info
-LOG_FILE=logs/app.log
-LOG_MAX_SIZE=20m
-LOG_MAX_FILES=5
+# Local AI model settings
+AI_ENGINE_URL=http://localhost:5000
+MODEL_PATH=./models
+ENABLE_GPU=false
+ML_BATCH_SIZE=32
+ML_LEARNING_RATE=0.001
 
-# Monitoring
-ENABLE_METRICS=true
-METRICS_PORT=9090
-ENABLE_HEALTH_CHECK=true
-HEALTH_CHECK_PATH=/health
+# =============================================================================
+# EMAIL CONFIGURATION
+# =============================================================================
+# SendGrid (recommended)
+SENDGRID_API_KEY=your-sendgrid-api-key
+SENDGRID_FROM_EMAIL=noreply@admetrics.ai
+SENDGRID_FROM_NAME=AdMetrics
 
-# Webhooks
-WEBHOOK_SECRET=your-webhook-secret-key
-WEBHOOK_TIMEOUT=30000
+# Alternative email providers
+# SMTP_HOST=smtp.gmail.com
+# SMTP_PORT=587
+# SMTP_USER=your-email@gmail.com
+# SMTP_PASS=your-app-password
+# SMTP_SECURE=true
 
-# External Services
-SLACK_WEBHOOK_URL=your-slack-webhook-url
-DISCORD_WEBHOOK_URL=your-discord-webhook-url
+# =============================================================================
+# DATA PIPELINE CONFIGURATION
+# =============================================================================
+# Sync settings
+SYNC_INTERVAL=3600
+MAX_CONCURRENT_SYNCS=5
+SYNC_BATCH_SIZE=1000
+DATA_RETENTION_DAYS=365
 
-# Development Tools
-ENABLE_SWAGGER=true
-SWAGGER_TITLE=AdMetrics AI API
-SWAGGER_DESCRIPTION=Advertising Campaign Analytics API
-SWAGGER_VERSION=1.0.0
+# ETL configuration
+ETL_SCHEDULE=0 */6 * * *
+ETL_BATCH_SIZE=5000
+ETL_TIMEOUT=3600000
 
-# Testing
-TEST_DATABASE_URL=postgresql://postgres:postgres123@localhost:5432/admetrics_test
-TEST_EMAIL_BYPASS=true
-TEST_AI_MOCK=true
+# =============================================================================
+# MONITORING & OBSERVABILITY
+# =============================================================================
+# Prometheus
+PROMETHEUS_PORT=9090
 
-# Production Settings (uncomment for production)
-# NODE_ENV=production
-# ENABLE_HTTPS=true
-# SSL_CERT_PATH=/path/to/cert.pem
-# SSL_KEY_PATH=/path/to/key.pem
-# CORS_ORIGIN=https://dashboard.admetrics.ai
-# SECURE_COOKIES=true
-# TRUST_PROXY=true
+# Grafana
+GRAFANA_PORT=3002
+GRAFANA_ADMIN_USER=admin
+GRAFANA_ADMIN_PASSWORD=admin123
 
-# Docker Settings
-DOCKER_REGISTRY=your-docker-registry
-DOCKER_IMAGE_TAG=latest
+# Elasticsearch
+ELASTICSEARCH_PORT=9200
+ELASTICSEARCH_USERNAME=elastic
+ELASTICSEARCH_PASSWORD=elastic123
 
-# Kubernetes Settings
-K8S_NAMESPACE=admetrics
-K8S_CLUSTER_NAME=admetrics-cluster
+# Kibana
+KIBANA_PORT=5601
 
-# Backup Settings
-BACKUP_ENABLED=true
+# =============================================================================
+# MESSAGE QUEUE CONFIGURATION
+# =============================================================================
+# RabbitMQ
+RABBITMQ_PORT=5672
+RABBITMQ_MANAGEMENT_PORT=15672
+RABBITMQ_USER=admin
+RABBITMQ_PASSWORD=admin123
+RABBITMQ_VHOST=admetrics
+
+# =============================================================================
+# OBJECT STORAGE CONFIGURATION
+# =============================================================================
+# MinIO (S3-compatible)
+MINIO_PORT=9000
+MINIO_CONSOLE_PORT=9001
+MINIO_ROOT_USER=minioadmin
+MINIO_ROOT_PASSWORD=minioadmin123
+
+# AWS S3 (if using AWS instead of MinIO)
+# AWS_ACCESS_KEY_ID=your-aws-access-key
+# AWS_SECRET_ACCESS_KEY=your-aws-secret-key
+# AWS_REGION=us-east-1
+# AWS_S3_BUCKET=admetrics-uploads
+
+# =============================================================================
+# SSL/TLS CONFIGURATION
+# =============================================================================
+# SSL certificate paths (for production)
+SSL_CERT_PATH=/etc/nginx/ssl/admetrics.crt
+SSL_KEY_PATH=/etc/nginx/ssl/admetrics.key
+SSL_CA_PATH=/etc/nginx/ssl/ca.crt
+
+# Let's Encrypt settings
+LETSENCRYPT_EMAIL=admin@admetrics.ai
+LETSENCRYPT_DOMAIN=admetrics.ai
+
+# =============================================================================
+# BACKUP CONFIGURATION
+# =============================================================================
+# Database backup settings
 BACKUP_SCHEDULE=0 2 * * *
 BACKUP_RETENTION_DAYS=30
-BACKUP_STORAGE_PATH=./backups
-AWS_BACKUP_BUCKET=admetrics-backups
-AWS_ACCESS_KEY_ID=your-aws-access-key
-AWS_SECRET_ACCESS_KEY=your-aws-secret-key
-AWS_REGION=us-east-1
+BACKUP_COMPRESSION=true
+BACKUP_S3_BUCKET=admetrics-backups
 
-# Analytics & Tracking
-GOOGLE_ANALYTICS_ID=GA-XXXXXXXXX
+# =============================================================================
+# FEATURE FLAGS
+# =============================================================================
+# Enable/disable features
+ENABLE_API_DOCS=true
+ENABLE_SWAGGER=true
+ENABLE_REAL_TIME_UPDATES=true
+ENABLE_AI_INSIGHTS=true
+ENABLE_AUTOMATIC_OPTIMIZATION=false
+ENABLE_NOTIFICATIONS=true
+ENABLE_WEBHOOKS=true
+
+# Development features
+DEV_SEED_DATA=true
+HOT_RELOAD=true
+DEBUG_MODE=true
+MOCK_EXTERNAL_APIS=false
+
+# =============================================================================
+# EXTERNAL SERVICES
+# =============================================================================
+# Webhook URLs
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR/DISCORD/WEBHOOK
+
+# Analytics and tracking
+GOOGLE_ANALYTICS_ID=UA-XXXXXXXX-X
 MIXPANEL_TOKEN=your-mixpanel-token
 SEGMENT_WRITE_KEY=your-segment-write-key
 
-# Feature Flags
-ENABLE_BETA_FEATURES=false
-ENABLE_ADVANCED_AI=true
-ENABLE_MULTI_TENANCY=false
-ENABLE_REAL_TIME_UPDATES=true
+# Error tracking
+SENTRY_DSN=https://your-sentry-dsn@sentry.io/project-id
 
-# Performance
-CACHE_ENABLED=true
+# =============================================================================
+# PERFORMANCE SETTINGS
+# =============================================================================
+# Cache settings
 CACHE_TTL=300
-ENABLE_COMPRESSION=true
-MAX_REQUEST_SIZE=50mb
+CACHE_MAX_SIZE=1000
+ENABLE_QUERY_CACHE=true
 
-# Security
-HELMET_ENABLED=true
-RATE_LIMIT_ENABLED=true
-CSRF_PROTECTION=true
-CONTENT_SECURITY_POLICY=true
-FORCE_HTTPS=false
+# Request timeout settings
+API_TIMEOUT=30000
+UPLOAD_TIMEOUT=300000
+WEBSOCKET_TIMEOUT=60000
 
-# Sentry Error Tracking
-SENTRY_DSN=your-sentry-dsn
-SENTRY_ENVIRONMENT=development
-SENTRY_RELEASE=1.0.0
+# Concurrency settings
+MAX_CONCURRENT_REQUESTS=100
+MAX_UPLOAD_SIZE=10485760
+MAX_JSON_SIZE=1048576
 
-# Monitoring & Alerting
-PROMETHEUS_ENABLED=true
-GRAFANA_URL=http://localhost:3000
-ALERT_MANAGER_URL=http://localhost:9093
-
-# Social Login (Optional)
-GOOGLE_OAUTH_CLIENT_ID=your-google-oauth-client-id
-GOOGLE_OAUTH_CLIENT_SECRET=your-google-oauth-client-secret
-FACEBOOK_OAUTH_APP_ID=your-facebook-oauth-app-id
-FACEBOOK_OAUTH_APP_SECRET=your-facebook-oauth-app-secret
-GITHUB_OAUTH_CLIENT_ID=your-github-oauth-client-id
-GITHUB_OAUTH_CLIENT_SECRET=your-github-oauth-client-secret
-
-# Localization
+# =============================================================================
+# LOCALIZATION
+# =============================================================================
 DEFAULT_LANGUAGE=en
-SUPPORTED_LANGUAGES=en,es,pt,fr,de
-TIMEZONE=UTC
+SUPPORTED_LANGUAGES=en,es,fr,de,pt
+DEFAULT_TIMEZONE=UTC
+DEFAULT_CURRENCY=USD
 
-# AI Model Configuration
-PREDICTION_MODEL_PATH=./models/performance_predictor.joblib
-ANOMALY_MODEL_PATH=./models/anomaly_detector.joblib
-OPTIMIZATION_MODEL_PATH=./models/budget_optimizer.joblib
-MODEL_UPDATE_INTERVAL=86400
-ENABLE_MODEL_TRAINING=true
-TRAINING_DATA_RETENTION_DAYS=90
+# =============================================================================
+# COMPLIANCE & PRIVACY
+# =============================================================================
+# GDPR compliance
+ENABLE_GDPR_MODE=false
+DATA_RETENTION_POLICY=365
+COOKIE_CONSENT_REQUIRED=true
+
+# Privacy settings
+ANONYMIZE_IP_ADDRESSES=true
+ENABLE_DATA_EXPORT=true
+ENABLE_DATA_DELETION=true
+
+# =============================================================================
+# DEVELOPMENT & TESTING
+# =============================================================================
+# Test database (for automated tests)
+TEST_DATABASE_URL=postgresql://postgres:postgres123@localhost:5433/admetrics_test
+TEST_REDIS_URL=redis://localhost:6380
+
+# Mock data settings
+GENERATE_MOCK_DATA=false
+MOCK_DATA_SIZE=1000
+
+# Debug settings
+ENABLE_SQL_LOGGING=false
+ENABLE_REQUEST_LOGGING=true
+ENABLE_PERFORMANCE_MONITORING=true
+
+# =============================================================================
+# DEPLOYMENT SETTINGS
+# =============================================================================
+# Build settings
+BUILD_OPTIMIZE=true
+BUILD_ANALYZE=false
+BUILD_SOURCEMAP=false
+
+# Health check settings
+HEALTH_CHECK_INTERVAL=30
+HEALTH_CHECK_TIMEOUT=5
+HEALTH_CHECK_RETRIES=3
+
+# =============================================================================
+# FRONTEND URL CONFIGURATION
+# =============================================================================
+FRONTEND_URL=http://localhost:3001
+
+# =============================================================================
+# NOTES
+# =============================================================================
+# 1. Change all default passwords and secrets in production
+# 2. Use environment-specific files (.env.production, .env.staging)
+# 3. Never commit .env files to version control
+# 4. Use a secure key management system in production
+# 5. Regularly rotate API keys and secrets
+# 6. Monitor for any exposed credentials

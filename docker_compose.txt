@@ -1,4 +1,4 @@
-# docker-compose.yml - AdMetrics AI Dashboard
+# AdMetrics AI Dashboard - Complete Docker Compose Configuration
 version: '3.8'
 
 services:
@@ -15,6 +15,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/init:/docker-entrypoint-initdb.d
+      - ./database/backups:/backups
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     networks:
@@ -24,8 +25,13 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  # Redis Cache
+  # Redis Cache & Session Store
   redis:
     image: redis:7-alpine
     container_name: admetrics-redis
@@ -33,17 +39,23 @@ services:
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis123}
     volumes:
       - redis_data:/data
+      - ./infrastructure/redis/redis.conf:/usr/local/etc/redis/redis.conf
     ports:
       - "${REDIS_PORT:-6379}:6379"
     networks:
       - admetrics-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
       interval: 30s
       timeout: 10s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
 
-  # Backend API
+  # Backend API Server
   backend:
     build:
       context: ./backend
@@ -61,6 +73,7 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-your-encryption-key}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3001}
       AI_ENGINE_URL: http://ai-engine:5000
+      
       # Platform API Keys
       GOOGLE_ADS_DEVELOPER_TOKEN: ${GOOGLE_ADS_DEVELOPER_TOKEN}
       FACEBOOK_APP_ID: ${FACEBOOK_APP_ID}
@@ -69,9 +82,14 @@ services:
       TIKTOK_APP_SECRET: ${TIKTOK_APP_SECRET}
       LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID}
       LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET}
+      
       # Email Service
       SENDGRID_API_KEY: ${SENDGRID_API_KEY}
-      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL}
+      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-noreply@admetrics.ai}
+      
+      # Monitoring
+      ENABLE_METRICS: ${ENABLE_METRICS:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - ./backend:/app
       - /app/node_modules
@@ -91,8 +109,13 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
 
-  # Frontend React App
+  # Frontend React Application
   frontend:
     build:
       context: ./frontend
@@ -102,8 +125,9 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: ${NODE_ENV:-development}
-      REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:3000/api}
-      REACT_APP_WS_URL: ${REACT_APP_WS_URL:-ws://localhost:3000}
+      REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:3000}
+      REACT_APP_WS_URL: ${REACT_APP_WS_URL:-http://localhost:3000}
+      REACT_APP_ENVIRONMENT: ${NODE_ENV:-development}
       GENERATE_SOURCEMAP: ${GENERATE_SOURCEMAP:-true}
     volumes:
       - ./frontend:/app
@@ -118,9 +142,14 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:3000"]
       interval: 30s
       timeout: 10s
-      retries: 5
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
 
-  # AI Engine (Python/Flask)
+  # AI Engine - Python/Flask ML Service
   ai-engine:
     build:
       context: ./ai-engine
@@ -129,17 +158,35 @@ services:
     container_name: admetrics-ai-engine
     restart: unless-stopped
     environment:
-      FLASK_ENV: ${FLASK_ENV:-development}
+      FLASK_ENV: ${PYTHON_ENV:-development}
       FLASK_DEBUG: ${FLASK_DEBUG:-1}
+      PORT: 5000
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@postgres:5432/${POSTGRES_DB:-admetrics}
       REDIS_URL: redis://:${REDIS_PASSWORD:-redis123}@redis:6379
-      MODEL_STORAGE_PATH: /app/models
+      
+      # Database connection details for AI engine
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-admetrics}
+      DB_USER: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres123}
+      
+      # Redis connection details
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis123}
+      REDIS_DB: 1
+      
+      # AI/ML Configuration
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      ENABLE_AI_FEATURES: ${ENABLE_AI_FEATURES:-true}
+      MODEL_PATH: /app/models
+      ENABLE_GPU: ${ENABLE_GPU:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - ./ai-engine:/app
       - ./models:/app/models
       - ./data:/app/data
+      - ./logs:/app/logs
     ports:
       - "${AI_ENGINE_PORT:-5000}:5000"
     depends_on:
@@ -152,27 +199,38 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
-      timeout: 10s
+      timeout: 15s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
 
-  # Data Pipeline (ETL)
+  # Data Pipeline Service
   data-pipeline:
     build:
       context: ./data-pipeline
       dockerfile: Dockerfile
+      target: ${PYTHON_ENV:-development}
     container_name: admetrics-data-pipeline
     restart: unless-stopped
     environment:
       PYTHON_ENV: ${PYTHON_ENV:-development}
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@postgres:5432/${POSTGRES_DB:-admetrics}
       REDIS_URL: redis://:${REDIS_PASSWORD:-redis123}@redis:6379
-      BACKEND_URL: http://backend:3000
-      # Platform API Keys
+      
+      # Platform API configurations
       GOOGLE_ADS_DEVELOPER_TOKEN: ${GOOGLE_ADS_DEVELOPER_TOKEN}
       FACEBOOK_APP_ID: ${FACEBOOK_APP_ID}
       FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET}
       TIKTOK_APP_ID: ${TIKTOK_APP_ID}
       TIKTOK_APP_SECRET: ${TIKTOK_APP_SECRET}
+      
+      # Sync configuration
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-3600}
+      MAX_CONCURRENT_SYNCS: ${MAX_CONCURRENT_SYNCS:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - ./data-pipeline:/app
       - ./data:/app/data
@@ -182,14 +240,22 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      backend:
-        condition: service_healthy
     networks:
       - admetrics-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
 
-  # Nginx Reverse Proxy
+  # Nginx Reverse Proxy & Load Balancer
   nginx:
-    image: nginx:1.25-alpine
+    image: nginx:alpine
     container_name: admetrics-nginx
     restart: unless-stopped
     ports:
@@ -203,15 +269,23 @@ services:
     depends_on:
       - backend
       - frontend
+      - ai-engine
     networks:
       - admetrics-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      test: ["CMD", "nginx", "-t"]
       interval: 30s
       timeout: 10s
-      retries: 5
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
 
-  # Monitoring - Prometheus
+  # Monitoring Stack
+  
+  # Prometheus - Metrics Collection
   prometheus:
     image: prom/prometheus:latest
     container_name: admetrics-prometheus
@@ -221,7 +295,7 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--web.console.libraries=/etc/prometheus/console_libraries'
       - '--web.console.templates=/etc/prometheus/consoles'
-      - '--storage.tsdb.retention.time=200h'
+      - '--storage.tsdb.retention.time=30d'
       - '--web.enable-lifecycle'
     volumes:
       - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -230,37 +304,46 @@ services:
       - "${PROMETHEUS_PORT:-9090}:9090"
     networks:
       - admetrics-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
-  # Monitoring - Grafana
+  # Grafana - Monitoring Dashboards
   grafana:
     image: grafana/grafana:latest
     container_name: admetrics-grafana
     restart: unless-stopped
     environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin123}
       GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./infrastructure/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./infrastructure/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./infrastructure/monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./infrastructure/monitoring/grafana/dashboards:/var/lib/grafana/dashboards
     ports:
       - "${GRAFANA_PORT:-3002}:3000"
     depends_on:
       - prometheus
     networks:
       - admetrics-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
-  # Log Management - Elasticsearch
+  # Elasticsearch - Log Storage and Search
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: admetrics-elasticsearch
     restart: unless-stopped
     environment:
       - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
       - xpack.security.enabled=false
-      - xpack.security.enrollment.enabled=false
     volumes:
       - elasticsearch_data:/usr/share/elasticsearch/data
     ports:
@@ -273,7 +356,7 @@ services:
       timeout: 10s
       retries: 5
 
-  # Log Management - Kibana
+  # Kibana - Log Visualization
   kibana:
     image: docker.elastic.co/kibana/kibana:8.11.0
     container_name: admetrics-kibana
@@ -287,8 +370,13 @@ services:
         condition: service_healthy
     networks:
       - admetrics-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
-  # Message Queue - RabbitMQ (for background jobs)
+  # Message Queue - RabbitMQ
   rabbitmq:
     image: rabbitmq:3.12-management-alpine
     container_name: admetrics-rabbitmq
@@ -296,8 +384,10 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-admin123}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-admetrics}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+      - ./infrastructure/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
     ports:
       - "${RABBITMQ_PORT:-5672}:5672"
       - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
@@ -309,6 +399,51 @@ services:
       timeout: 10s
       retries: 5
 
+  # MinIO - Object Storage (for file uploads, exports, etc.)
+  minio:
+    image: minio/minio:latest
+    container_name: admetrics-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    networks:
+      - admetrics-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Backup Service
+  backup:
+    image: postgres:15-alpine
+    container_name: admetrics-backup
+    restart: "no"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres123}
+      POSTGRES_DB: ${POSTGRES_DB:-admetrics}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-0 2 * * *}
+    volumes:
+      - ./database/backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - admetrics-network
+    profiles:
+      - backup
+    entrypoint: ["/backup.sh"]
+
+# Named volumes for persistent data
 volumes:
   postgres_data:
     driver: local
@@ -322,144 +457,14 @@ volumes:
     driver: local
   rabbitmq_data:
     driver: local
+  minio_data:
+    driver: local
 
+# Custom network for service communication
 networks:
   admetrics-network:
     driver: bridge
     name: admetrics-network
-
----
-
-# docker-compose.override.yml - Development overrides
-version: '3.8'
-
-services:
-  backend:
-    volumes:
-      - ./backend:/app
-      - /app/node_modules
-    environment:
-      NODE_ENV: development
-      LOG_LEVEL: debug
-    command: npm run dev
-
-  frontend:
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    environment:
-      NODE_ENV: development
-      FAST_REFRESH: true
-    command: npm start
-
-  ai-engine:
-    volumes:
-      - ./ai-engine:/app
-    environment:
-      FLASK_ENV: development
-      FLASK_DEBUG: 1
-    command: python src/api/app.py
-
-  data-pipeline:
-    volumes:
-      - ./data-pipeline:/app
-    environment:
-      PYTHON_ENV: development
-      DEBUG: 1
-
----
-
-# docker-compose.prod.yml - Production overrides
-version: '3.8'
-
-services:
-  backend:
-    environment:
-      NODE_ENV: production
-      LOG_LEVEL: info
-    command: npm start
-    deploy:
-      replicas: 2
-      update_config:
-        parallelism: 1
-        delay: 10s
-      restart_policy:
-        condition: on-failure
-
-  frontend:
-    environment:
-      NODE_ENV: production
-      GENERATE_SOURCEMAP: false
-    command: serve -s build -l 3000
-    deploy:
-      replicas: 2
-
-  ai-engine:
-    environment:
-      FLASK_ENV: production
-      FLASK_DEBUG: 0
-    command: gunicorn --bind 0.0.0.0:5000 --workers 4 src.api.app:app
-    deploy:
-      replicas: 2
-
-  nginx:
-    volumes:
-      - ./infrastructure/nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
-      - ./infrastructure/ssl:/etc/nginx/ssl:ro
-
----
-
-# docker-compose.test.yml - Testing environment
-version: '3.8'
-
-services:
-  postgres-test:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_DB: admetrics_test
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres123
-    tmpfs:
-      - /var/lib/postgresql/data
-
-  redis-test:
-    image: redis:7-alpine
-    command: redis-server --appendonly no
-    tmpfs:
-      - /data
-
-  backend-test:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-      target: test
-    environment:
-      NODE_ENV: test
-      DATABASE_URL: postgresql://postgres:postgres123@postgres-test:5432/admetrics_test
-      REDIS_URL: redis://redis-test:6379
-    depends_on:
-      - postgres-test
-      - redis-test
-    command: npm test
-
-  frontend-test:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      target: test
-    environment:
-      NODE_ENV: test
-      CI: true
-    command: npm test -- --coverage --watchAll=false
-
-  ai-engine-test:
-    build:
-      context: ./ai-engine
-      dockerfile: Dockerfile
-      target: test
-    environment:
-      FLASK_ENV: test
-      DATABASE_URL: postgresql://postgres:postgres123@postgres-test:5432/admetrics_test
-    depends_on:
-      - postgres-test
-    command: python -m pytest tests/ --cov=src --cov-report=xml
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

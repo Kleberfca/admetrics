@@ -1,364 +1,293 @@
-// frontend/src/hooks/useAuth.ts
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useEffect, useCallback, useContext, createContext } from 'react';
 import { useNavigate } from 'react-router-dom';
-import toast from 'react-hot-toast';
 import { apiService } from '../services/api.service';
-import { useAuthStore } from '../store/auth.store';
-import type { LoginCredentials, RegisterData, User } from '../types/auth.types';
+import toast from 'react-hot-toast';
 
-interface UseAuthReturn {
-  // State
-  isLoading: boolean;
-  isAuthenticated: boolean;
-  user: User | null;
-  
-  // Actions
-  login: (credentials: LoginCredentials) => Promise<boolean>;
-  register: (data: RegisterData) => Promise<boolean>;
-  logout: () => Promise<void>;
-  forgotPassword: (email: string) => Promise<boolean>;
-  resetPassword: (token: string, password: string) => Promise<boolean>;
-  updateProfile: (data: Partial<User>) => Promise<boolean>;
-  refreshProfile: () => Promise<void>;
-  initialize: () => Promise<void>;
-  
-  // Utilities
-  hasRole: (role: string) => boolean;
-  hasPermission: (permission: string) => boolean;
+interface User {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  avatar?: string;
+  preferences?: any;
+  organizationId?: string;
 }
 
-export const useAuth = (): UseAuthReturn => {
+interface AuthContextType {
+  user: User | null;
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  login: (email: string, password: string) => Promise<void>;
+  register: (data: RegisterData) => Promise<void>;
+  logout: () => Promise<void>;
+  updateProfile: (data: Partial<User>) => Promise<void>;
+  refreshUser: () => Promise<void>;
+}
+
+interface RegisterData {
+  name: string;
+  email: string;
+  password: string;
+  confirmPassword: string;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   const navigate = useNavigate();
-  const [isLoading, setIsLoading] = useState(false);
-  
-  const {
-    user,
-    isAuthenticated,
-    setUser,
-    setTokens,
-    clearAuth,
-    isInitialized,
-    setInitialized
-  } = useAuthStore();
 
-  /**
-   * Initialize authentication state from storage
-   */
-  const initialize = useCallback(async () => {
-    if (isInitialized) return;
+  const isAuthenticated = !!user;
 
-    setIsLoading(true);
-    
-    try {
-      const token = localStorage.getItem('token');
-      const refreshToken = localStorage.getItem('refreshToken');
-      
-      if (token && refreshToken) {
-        // Validate token by fetching user profile
-        const userData = await apiService.getProfile();
-        setUser(userData);
-        setTokens(token, refreshToken);
-      }
-    } catch (error) {
-      // Token invalid, clear auth data
-      clearAuth();
-      localStorage.removeItem('token');
-      localStorage.removeItem('refreshToken');
-    } finally {
-      setInitialized(true);
-      setIsLoading(false);
-    }
-  }, [isInitialized, setUser, setTokens, clearAuth, setInitialized]);
-
-  /**
-   * Login user
-   */
-  const login = useCallback(async (credentials: LoginCredentials): Promise<boolean> => {
-    setIsLoading(true);
-    
-    try {
-      const response = await apiService.login(credentials);
-      
-      if (response.success && response.user && response.token && response.refreshToken) {
-        // Store tokens
-        localStorage.setItem('token', response.token);
-        localStorage.setItem('refreshToken', response.refreshToken);
-        
-        // Update auth state
-        setUser(response.user);
-        setTokens(response.token, response.refreshToken);
-        
-        toast.success(response.message || 'Login successful!');
-        
-        // Navigate to dashboard
-        navigate('/dashboard', { replace: true });
-        
-        return true;
-      } else {
-        toast.error(response.message || 'Login failed');
-        return false;
-      }
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.message || 'Login failed. Please try again.';
-      toast.error(errorMessage);
-      return false;
-    } finally {
-      setIsLoading(false);
-    }
-  }, [navigate, setUser, setTokens]);
-
-  /**
-   * Register new user
-   */
-  const register = useCallback(async (data: RegisterData): Promise<boolean> => {
-    setIsLoading(true);
-    
-    try {
-      const response = await apiService.register(data);
-      
-      if (response.success && response.user && response.token && response.refreshToken) {
-        // Store tokens
-        localStorage.setItem('token', response.token);
-        localStorage.setItem('refreshToken', response.refreshToken);
-        
-        // Update auth state
-        setUser(response.user);
-        setTokens(response.token, response.refreshToken);
-        
-        toast.success(response.message || 'Account created successfully!');
-        
-        // Navigate to dashboard
-        navigate('/dashboard', { replace: true });
-        
-        return true;
-      } else {
-        toast.error(response.message || 'Registration failed');
-        return false;
-      }
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.message || 'Registration failed. Please try again.';
-      toast.error(errorMessage);
-      return false;
-    } finally {
-      setIsLoading(false);
-    }
-  }, [navigate, setUser, setTokens]);
-
-  /**
-   * Logout user
-   */
-  const logout = useCallback(async () => {
-    setIsLoading(true);
-    
-    try {
-      await apiService.logout();
-    } catch (error) {
-      // Continue with logout even if API call fails
-      console.warn('Logout API call failed:', error);
-    } finally {
-      // Clear auth state and storage
-      clearAuth();
-      localStorage.removeItem('token');
-      localStorage.removeItem('refreshToken');
-      
-      toast.success('Logged out successfully');
-      
-      // Navigate to login
-      navigate('/auth/login', { replace: true });
-      
-      setIsLoading(false);
-    }
-  }, [navigate, clearAuth]);
-
-  /**
-   * Send forgot password email
-   */
-  const forgotPassword = useCallback(async (email: string): Promise<boolean> => {
-    setIsLoading(true);
-    
-    try {
-      const response = await apiService.forgotPassword(email);
-      
-      if (response.success) {
-        toast.success(response.message || 'Password reset email sent!');
-        return true;
-      } else {
-        toast.error(response.message || 'Failed to send reset email');
-        return false;
-      }
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.message || 'Failed to send reset email';
-      toast.error(errorMessage);
-      return false;
-    } finally {
-      setIsLoading(false);
-    }
+  // Check if user is authenticated on mount
+  useEffect(() => {
+    checkAuthStatus();
   }, []);
 
-  /**
-   * Reset password with token
-   */
-  const resetPassword = useCallback(async (token: string, password: string): Promise<boolean> => {
-    setIsLoading(true);
-    
+  const checkAuthStatus = async () => {
     try {
-      const response = await apiService.resetPassword(token, password);
-      
-      if (response.success) {
-        toast.success(response.message || 'Password reset successfully!');
-        
-        // Navigate to login
-        navigate('/auth/login', { replace: true });
-        
-        return true;
-      } else {
-        toast.error(response.message || 'Failed to reset password');
-        return false;
+      const token = localStorage.getItem('auth_token');
+      if (!token) {
+        setIsLoading(false);
+        return;
       }
+
+      const userData = await apiService.getCurrentUser();
+      setUser(userData);
+    } catch (error) {
+      localStorage.removeItem('auth_token');
+      console.error('Auth check failed:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const login = useCallback(async (email: string, password: string) => {
+    try {
+      setIsLoading(true);
+      const { user: userData, token } = await apiService.login({ email, password });
+      
+      setUser(userData);
+      localStorage.setItem('auth_token', token);
+      
+      // Navigate to dashboard or intended page
+      const intendedPath = sessionStorage.getItem('intended_path') || '/dashboard';
+      sessionStorage.removeItem('intended_path');
+      navigate(intendedPath);
+      
     } catch (error: any) {
-      const errorMessage = error.response?.data?.message || 'Failed to reset password';
-      toast.error(errorMessage);
-      return false;
+      throw error; // Re-throw to be handled by the component
     } finally {
       setIsLoading(false);
     }
   }, [navigate]);
 
-  /**
-   * Update user profile
-   */
-  const updateProfile = useCallback(async (data: Partial<User>): Promise<boolean> => {
-    setIsLoading(true);
-    
+  const register = useCallback(async (data: RegisterData) => {
     try {
-      const updatedUser = await apiService.updateProfile(data);
+      setIsLoading(true);
       
-      // Update auth state
-      setUser(updatedUser);
+      if (data.password !== data.confirmPassword) {
+        throw new Error('Passwords do not match');
+      }
+
+      const { user: userData, token } = await apiService.register(data);
       
-      toast.success('Profile updated successfully!');
-      return true;
+      setUser(userData);
+      localStorage.setItem('auth_token', token);
+      
+      navigate('/dashboard');
+      
     } catch (error: any) {
-      const errorMessage = error.response?.data?.message || 'Failed to update profile';
-      toast.error(errorMessage);
-      return false;
+      throw error;
     } finally {
       setIsLoading(false);
     }
-  }, [setUser]);
+  }, [navigate]);
 
-  /**
-   * Refresh user profile data
-   */
-  const refreshProfile = useCallback(async () => {
-    if (!isAuthenticated) return;
-    
+  const logout = useCallback(async () => {
     try {
-      const userData = await apiService.getProfile();
+      setIsLoading(true);
+      await apiService.logout();
+    } catch (error) {
+      console.error('Logout error:', error);
+    } finally {
+      setUser(null);
+      localStorage.removeItem('auth_token');
+      setIsLoading(false);
+      navigate('/login');
+    }
+  }, [navigate]);
+
+  const updateProfile = useCallback(async (data: Partial<User>) => {
+    try {
+      const updatedUser = await apiService.updateProfile(data);
+      setUser(prev => prev ? { ...prev, ...updatedUser } : null);
+    } catch (error) {
+      throw error;
+    }
+  }, []);
+
+  const refreshUser = useCallback(async () => {
+    try {
+      const userData = await apiService.getCurrentUser();
       setUser(userData);
     } catch (error) {
-      console.error('Failed to refresh profile:', error);
-      // Don't show error toast for this operation
+      console.error('Failed to refresh user data:', error);
     }
-  }, [isAuthenticated, setUser]);
+  }, []);
 
-  /**
-   * Check if user has specific role
-   */
-  const hasRole = useCallback((role: string): boolean => {
-    if (!user) return false;
-    return user.role === role || user.role === 'ADMIN'; // Admin has all roles
-  }, [user]);
-
-  /**
-   * Check if user has specific permission
-   */
-  const hasPermission = useCallback((permission: string): boolean => {
-    if (!user) return false;
-    
-    // Admin has all permissions
-    if (user.role === 'ADMIN') return true;
-    
-    // Check user permissions (if implemented)
-    // This would need to be expanded based on your permission system
-    const userPermissions = user.permissions || [];
-    return userPermissions.includes(permission);
-  }, [user]);
-
-  // Auto-initialize on mount
-  useEffect(() => {
-    if (!isInitialized) {
-      initialize();
-    }
-  }, [initialize, isInitialized]);
-
-  // Auto-refresh profile data periodically
-  useEffect(() => {
-    if (!isAuthenticated || !user) return;
-
-    const interval = setInterval(() => {
-      refreshProfile();
-    }, 5 * 60 * 1000); // Refresh every 5 minutes
-
-    return () => clearInterval(interval);
-  }, [isAuthenticated, user, refreshProfile]);
-
-  // Listen for storage changes (e.g., logout in another tab)
-  useEffect(() => {
-    const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === 'token' && !e.newValue && isAuthenticated) {
-        // Token was removed in another tab
-        clearAuth();
-        navigate('/auth/login', { replace: true });
-        toast.info('You have been logged out');
-      }
-    };
-
-    window.addEventListener('storage', handleStorageChange);
-    return () => window.removeEventListener('storage', handleStorageChange);
-  }, [isAuthenticated, clearAuth, navigate]);
-
-  // Listen for online/offline status
-  useEffect(() => {
-    const handleOnline = () => {
-      if (isAuthenticated) {
-        refreshProfile();
-        toast.success('Connection restored');
-      }
-    };
-
-    const handleOffline = () => {
-      toast.error('Connection lost. Some features may not work.');
-    };
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [isAuthenticated, refreshProfile]);
-
-  return {
-    // State
-    isLoading,
-    isAuthenticated,
+  const value: AuthContextType = {
     user,
-    
-    // Actions
+    isAuthenticated,
+    isLoading,
     login,
     register,
     logout,
-    forgotPassword,
-    resetPassword,
     updateProfile,
-    refreshProfile,
-    initialize,
+    refreshUser,
+  };
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+};
+
+export const useAuth = (): AuthContextType => {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+};
+
+// Additional hooks for specific auth scenarios
+
+export const useRequireAuth = () => {
+  const { isAuthenticated, isLoading } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated) {
+      // Store the intended path before redirecting
+      sessionStorage.setItem('intended_path', window.location.pathname);
+      navigate('/login');
+    }
+  }, [isAuthenticated, isLoading, navigate]);
+
+  return { isAuthenticated, isLoading };
+};
+
+export const useAuthRedirect = () => {
+  const { isAuthenticated, isLoading } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!isLoading && isAuthenticated) {
+      navigate('/dashboard');
+    }
+  }, [isAuthenticated, isLoading, navigate]);
+
+  return { isAuthenticated, isLoading };
+};
+
+// Hook for role-based access control
+export const useRole = (requiredRoles: string | string[]) => {
+  const { user, isAuthenticated } = useAuth();
+  
+  const allowedRoles = Array.isArray(requiredRoles) ? requiredRoles : [requiredRoles];
+  const hasRole = user && allowedRoles.includes(user.role);
+  
+  return {
+    hasRole: !!hasRole,
+    userRole: user?.role,
+    isAuthenticated,
+  };
+};
+
+// Hook for handling authentication errors and token refresh
+export const useTokenRefresh = () => {
+  const { logout } = useAuth();
+
+  const handleTokenRefresh = useCallback(async () => {
+    try {
+      const newToken = await apiService.refreshToken();
+      localStorage.setItem('auth_token', newToken);
+      return true;
+    } catch (error) {
+      console.error('Token refresh failed:', error);
+      toast.error('Session expired. Please login again.');
+      await logout();
+      return false;
+    }
+  }, [logout]);
+
+  return { handleTokenRefresh };
+};
+
+// Hook for managing user sessions
+export const useSession = () => {
+  const { user, isAuthenticated, logout } = useAuth();
+  const [sessionWarning, setSessionWarning] = useState(false);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    // Check for session expiry warning (e.g., 5 minutes before expiry)
+    const checkSessionExpiry = () => {
+      const token = localStorage.getItem('auth_token');
+      if (!token) return;
+
+      try {
+        // Decode JWT to check expiry (simplified - in production use a proper JWT library)
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        const expiryTime = payload.exp * 1000;
+        const currentTime = Date.now();
+        const timeUntilExpiry = expiryTime - currentTime;
+
+        // Show warning 5 minutes before expiry
+        if (timeUntilExpiry <= 5 * 60 * 1000 && timeUntilExpiry > 0) {
+          setSessionWarning(true);
+        }
+
+        // Auto-logout if expired
+        if (timeUntilExpiry <= 0) {
+          toast.error('Session expired');
+          logout();
+        }
+      } catch (error) {
+        console.error('Error checking session expiry:', error);
+      }
+    };
+
+    // Check every minute
+    const interval = setInterval(checkSessionExpiry, 60000);
     
-    // Utilities
-    hasRole,
-    hasPermission
+    // Check immediately
+    checkSessionExpiry();
+
+    return () => clearInterval(interval);
+  }, [isAuthenticated, logout]);
+
+  const extendSession = useCallback(async () => {
+    try {
+      await apiService.refreshToken();
+      setSessionWarning(false);
+      toast.success('Session extended');
+    } catch (error) {
+      console.error('Failed to extend session:', error);
+      toast.error('Failed to extend session');
+    }
+  }, []);
+
+  const dismissSessionWarning = useCallback(() => {
+    setSessionWarning(false);
+  }, []);
+
+  return {
+    sessionWarning,
+    extendSession,
+    dismissSessionWarning,
+    user,
+    isAuthenticated,
   };
 };
 
