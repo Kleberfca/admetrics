@@ -1,0 +1,376 @@
+// This is your Prisma schema file
+// Learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+enum UserRole {
+  ADMIN
+  USER
+  VIEWER
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING
+}
+
+enum Platform {
+  GOOGLE_ADS
+  FACEBOOK_ADS
+  INSTAGRAM_ADS
+  TIKTOK_ADS
+  LINKEDIN_ADS
+  TWITTER_ADS
+  YOUTUBE_ADS
+  PINTEREST_ADS
+  SNAPCHAT_ADS
+}
+
+enum IntegrationStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+  PENDING
+}
+
+enum CampaignStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  DRAFT
+  SCHEDULED
+}
+
+enum SyncFrequency {
+  REAL_TIME
+  EVERY_5_MINUTES
+  EVERY_15_MINUTES
+  HOURLY
+  DAILY
+}
+
+enum BudgetType {
+  DAILY
+  LIFETIME
+}
+
+enum MetricGranularity {
+  HOURLY
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum AlertType {
+  BUDGET_EXCEEDED
+  PERFORMANCE_DROP
+  ANOMALY_DETECTED
+  CAMPAIGN_ENDED
+  INTEGRATION_ERROR
+}
+
+enum AlertSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+// Models
+model User {
+  id                String      @id @default(uuid())
+  email             String      @unique
+  password          String
+  firstName         String
+  lastName          String
+  company           String?
+  role              UserRole    @default(USER)
+  status            UserStatus  @default(PENDING)
+  emailVerified     Boolean     @default(false)
+  emailVerifyToken  String?
+  passwordResetToken String?
+  passwordResetExpires DateTime?
+  profileImage      String?
+  phone             String?
+  timezone          String      @default("UTC")
+  language          String      @default("en")
+  lastLoginAt       DateTime?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  deletedAt         DateTime?
+
+  // Relations
+  campaigns         Campaign[]
+  integrations      Integration[]
+  reports           Report[]
+  alerts            Alert[]
+  permissions       UserPermission[]
+  sessions          Session[]
+  auditLogs         AuditLog[]
+  preferences       UserPreference[]
+
+  @@index([email])
+  @@index([status])
+}
+
+model Session {
+  id            String   @id @default(uuid())
+  userId        String
+  token         String   @unique
+  refreshToken  String   @unique
+  userAgent     String?
+  ipAddress     String?
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+  
+  // Relations
+  user          User     @relation(fields: [userId], references: [id])
+
+  @@index([token])
+  @@index([userId])
+}
+
+model UserPermission {
+  id         String   @id @default(uuid())
+  userId     String
+  permission String
+  grantedAt  DateTime @default(now())
+  grantedBy  String?
+
+  // Relations
+  user       User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, permission])
+}
+
+model UserPreference {
+  id        String   @id @default(uuid())
+  userId    String
+  key       String
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, key])
+}
+
+model Integration {
+  id               String            @id @default(uuid())
+  userId           String
+  platform         Platform
+  name             String
+  status           IntegrationStatus @default(PENDING)
+  credentials      Json              // Encrypted credentials
+  config           Json?
+  scopes           String[]
+  lastSyncAt       DateTime?
+  lastSyncError    String?
+  syncEnabled      Boolean           @default(true)
+  syncFrequency    SyncFrequency     @default(HOURLY)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  deletedAt        DateTime?
+
+  // Relations
+  user             User              @relation(fields: [userId], references: [id])
+  campaigns        Campaign[]
+  syncLogs         SyncLog[]
+
+  @@unique([userId, platform, name])
+  @@index([userId, platform])
+  @@index([status])
+}
+
+model Campaign {
+  id              String         @id @default(uuid())
+  userId          String
+  integrationId   String
+  platform        Platform
+  externalId      String         // Platform-specific campaign ID
+  name            String
+  status          CampaignStatus @default(DRAFT)
+  objective       String?
+  budget          Float?
+  budgetType      BudgetType?
+  startDate       DateTime?
+  endDate         DateTime?
+  targeting       Json?
+  geoTargeting    Json?
+  creatives       Json?
+  lastSyncAt      DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  deletedAt       DateTime?
+
+  // Relations
+  user            User           @relation(fields: [userId], references: [id])
+  integration     Integration    @relation(fields: [integrationId], references: [id])
+  metrics         Metric[]
+  alerts          Alert[]
+  aiInsights      AIInsight[]
+
+  @@unique([integrationId, externalId])
+  @@index([userId, platform])
+  @@index([status])
+  @@index([integrationId])
+}
+
+model Metric {
+  id                  String            @id @default(uuid())
+  campaignId          String
+  date                DateTime
+  granularity         MetricGranularity @default(DAILY)
+  
+  // Core metrics
+  impressions         Int               @default(0)
+  clicks              Int               @default(0)
+  spend               Float             @default(0)
+  conversions         Int               @default(0)
+  
+  // Calculated metrics
+  ctr                 Float?            // Click-through rate
+  cpc                 Float?            // Cost per click
+  cpm                 Float?            // Cost per mille
+  cpa                 Float?            // Cost per acquisition
+  roas                Float?            // Return on ad spend
+  conversionRate      Float?
+  
+  // Additional metrics
+  reach               Int?
+  frequency           Float?
+  engagements         Int?
+  videoViews          Int?
+  videoCompletions    Int?
+  leads               Int?
+  
+  // Platform-specific metrics
+  platformMetrics     Json?
+  
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  // Relations
+  campaign            Campaign          @relation(fields: [campaignId], references: [id])
+
+  @@unique([campaignId, date, granularity])
+  @@index([campaignId, date])
+  @@index([date])
+}
+
+model AIInsight {
+  id              String    @id @default(uuid())
+  campaignId      String
+  type            String    // prediction, optimization, anomaly
+  category        String    // performance, budget, audience, creative
+  title           String
+  description     String
+  severity        String    // info, warning, critical
+  confidence      Float     // 0-1 confidence score
+  data            Json      // Detailed insight data
+  recommendations Json[]    // AI recommendations
+  isRead          Boolean   @default(false)
+  isActioned      Boolean   @default(false)
+  actionedAt      DateTime?
+  expiresAt       DateTime?
+  createdAt       DateTime  @default(now())
+
+  // Relations
+  campaign        Campaign  @relation(fields: [campaignId], references: [id])
+
+  @@index([campaignId, type])
+  @@index([createdAt])
+}
+
+model Alert {
+  id              String        @id @default(uuid())
+  userId          String
+  campaignId      String?
+  type            AlertType
+  severity        AlertSeverity
+  title           String
+  message         String
+  data            Json?
+  isRead          Boolean       @default(false)
+  isResolved      Boolean       @default(false)
+  resolvedAt      DateTime?
+  createdAt       DateTime      @default(now())
+
+  // Relations
+  user            User          @relation(fields: [userId], references: [id])
+  campaign        Campaign?     @relation(fields: [campaignId], references: [id])
+
+  @@index([userId, isRead])
+  @@index([campaignId])
+  @@index([type, severity])
+}
+
+model Report {
+  id              String    @id @default(uuid())
+  userId          String
+  name            String
+  type            String    // performance, comparison, custom
+  filters         Json
+  dateRange       Json
+  metrics         String[]
+  groupBy         String[]
+  visualization   Json?
+  schedule        Json?     // Scheduling configuration
+  lastGeneratedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  user            User      @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model SyncLog {
+  id              String    @id @default(uuid())
+  integrationId   String
+  status          String    // success, partial, failed
+  recordsSync     Int       @default(0)
+  recordsFailed   Int       @default(0)
+  errors          Json?
+  startedAt       DateTime
+  completedAt     DateTime?
+  duration        Int?      // Duration in seconds
+
+  // Relations
+  integration     Integration @relation(fields: [integrationId], references: [id])
+
+  @@index([integrationId, startedAt])
+}
+
+model AuditLog {
+  id              String    @id @default(uuid())
+  userId          String
+  action          String
+  entity          String    // user, campaign, integration, etc.
+  entityId        String?
+  changes         Json?
+  metadata        Json?
+  ipAddress       String?
+  userAgent       String?
+  createdAt       DateTime  @default(now())
+
+  // Relations
+  user            User      @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([entity, entityId])
+  @@index([action])
+}
