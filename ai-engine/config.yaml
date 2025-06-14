@@ -1,0 +1,144 @@
+# AI Engine Configuration
+
+# Application Settings
+app:
+  name: "AdMetrics AI Engine"
+  version: "1.0.0"
+  debug: false
+  host: "0.0.0.0"
+  port: 5000
+
+# Database Configuration
+database:
+  host: ${DB_HOST:localhost}
+  port: ${DB_PORT:5432}
+  name: ${DB_NAME:admetrics}
+  user: ${DB_USER:postgres}
+  password: ${DB_PASSWORD:postgres}
+  pool_size: 10
+  max_overflow: 20
+
+# Redis Configuration
+redis:
+  host: ${REDIS_HOST:localhost}
+  port: ${REDIS_PORT:6379}
+  db: ${REDIS_DB:1}
+  password: ${REDIS_PASSWORD:}
+  ttl: 3600
+
+# Model Configuration
+models:
+  # Performance Prediction
+  performance_predictor:
+    type: "ensemble"
+    models:
+      - "prophet"
+      - "lstm"
+      - "lightgbm"
+    update_frequency: "daily"
+    lookback_days: 90
+    prediction_horizons: [7, 14, 30, 60, 90]
+    
+  # Budget Optimizer
+  budget_optimizer:
+    algorithm: "genetic"
+    population_size: 100
+    generations: 50
+    mutation_rate: 0.1
+    crossover_rate: 0.8
+    
+  # Audience Segmenter
+  audience_segmenter:
+    algorithm: "kmeans"
+    min_clusters: 3
+    max_clusters: 10
+    features:
+      - "age"
+      - "gender"
+      - "interests"
+      - "behavior"
+      - "location"
+      
+  # Anomaly Detector
+  anomaly_detector:
+    algorithm: "isolation_forest"
+    contamination: 0.1
+    n_estimators: 100
+    threshold_multiplier: 2.5
+
+# Training Configuration
+training:
+  batch_size: 32
+  epochs: 100
+  learning_rate: 0.001
+  early_stopping_patience: 10
+  validation_split: 0.2
+  
+# Feature Engineering
+features:
+  # Time-based features
+  time_features:
+    - "hour_of_day"
+    - "day_of_week"
+    - "day_of_month"
+    - "month"
+    - "quarter"
+    - "is_weekend"
+    - "is_holiday"
+    
+  # Lag features
+  lag_features:
+    - 1
+    - 7
+    - 14
+    - 30
+    
+  # Rolling statistics
+  rolling_windows:
+    - 3
+    - 7
+    - 14
+    - 30
+    
+# Metrics Configuration
+metrics:
+  primary:
+    - "roas"
+    - "cpa"
+    - "conversion_rate"
+  secondary:
+    - "ctr"
+    - "cpc"
+    - "cpm"
+    - "impressions"
+    - "clicks"
+    - "spend"
+
+# API Rate Limiting
+rate_limiting:
+  default: "50 per hour"
+  endpoints:
+    predict: "10 per hour"
+    optimize: "5 per hour"
+    train: "1 per day"
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/ai_engine.log"
+  max_size: "100MB"
+  backup_count: 5
+
+# MLflow Configuration
+mlflow:
+  tracking_uri: "sqlite:///mlflow.db"
+  experiment_name: "admetrics_models"
+  artifact_location: "./mlruns"
+
+# Model Serving
+serving:
+  max_batch_size: 32
+  timeout: 30
+  cache_predictions: true
+  cache_ttl: 300
