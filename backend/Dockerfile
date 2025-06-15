@@ -1,34 +1,30 @@
-# Backend Dockerfile
-FROM python:3.11-slim
+# Backend Dockerfile for Node.js/TypeScript
+FROM node:18-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci
 
-# Set working directory
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run build
+
+FROM node:18-alpine AS runner
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    postgresql-client \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+ENV NODE_ENV production
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 expressjs
 
-# Copy application code
-COPY . .
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/prisma ./prisma
 
-# Create non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
+USER expressjs
 
-# Expose port
-EXPOSE 8000
+EXPOSE 3000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
-
-# Default command (can be overridden)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["node", "dist/app.js"]

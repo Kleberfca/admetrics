@@ -34,7 +34,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # Backend API
   backend:
     build:
       context: ./backend
@@ -43,19 +42,20 @@ services:
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-admetrics}:${POSTGRES_PASSWORD:-admetrics123}@postgres:5432/${POSTGRES_DB:-admetrics}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis123}@redis:6379
-      - AI_ENGINE_URL=http://ai-engine:8001
-      - SECRET_KEY=${SECRET_KEY:-your-secret-key-here}
-      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - AI_ENGINE_URL=http://ai-engine:5000
+      - JWT_SECRET=${JWT_SECRET:-your-secret-key-here}
+      - NODE_ENV=${NODE_ENV:-development}
     volumes:
       - ./backend:/app
+      - /app/node_modules
     ports:
-      - "8000:8000"
+      - "3000:3000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: npm run dev
 
   # AI Engine
   ai-engine:
