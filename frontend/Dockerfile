@@ -1,51 +1,51 @@
-# Build stage
-FROM node:18-alpine AS builder
-
-# Set working directory
+# Frontend Dockerfile
+FROM node:18-alpine AS deps
+# Install dependencies only when needed
 WORKDIR /app
+COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml* ./
+RUN \
+  if [ -f yarn.lock ]; then yarn --frozen-lockfile; \
+  elif [ -f package-lock.json ]; then npm ci; \
+  elif [ -f pnpm-lock.yaml ]; then yarn global add pnpm && pnpm i; \
+  else echo "Lockfile not found." && exit 1; \
+  fi
 
-# Copy package files
-COPY package*.json ./
-
-# Install dependencies
-RUN npm ci
-
-# Copy source code
+# Rebuild the source code only when needed
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Build the application
+# Next.js collects completely anonymous telemetry data about general usage.
+# Learn more here: https://nextjs.org/telemetry
+# Uncomment the following line in case you want to disable telemetry during the build.
+# ENV NEXT_TELEMETRY_DISABLED 1
+
 RUN npm run build
 
-# Production stage
-FROM nginx:alpine
+# Production image, copy all the files and run next
+FROM node:18-alpine AS runner
+WORKDIR /app
 
-# Install curl for health checks
-RUN apk add --no-cache curl
+ENV NODE_ENV production
+# Uncomment the following line in case you want to disable telemetry during runtime.
+# ENV NEXT_TELEMETRY_DISABLED 1
 
-# Copy custom nginx config
-COPY --from=builder /app/nginx.conf /etc/nginx/conf.d/default.conf
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
 
-# Copy built application
-COPY --from=builder /app/build /usr/share/nginx/html
+# Copy built files
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
 
-# Create non-root user
-RUN addgroup -g 1001 -S nginx-user && \
-    adduser -S nginx-user -u 1001 && \
-    chown -R nginx-user:nginx-user /usr/share/nginx/html && \
-    chown -R nginx-user:nginx-user /var/cache/nginx && \
-    chown -R nginx-user:nginx-user /var/log/nginx && \
-    touch /var/run/nginx.pid && \
-    chown nginx-user:nginx-user /var/run/nginx.pid
+# Set correct permissions
+RUN chown -R nextjs:nodejs /app
 
-# Switch to non-root user
-USER nginx-user
+USER nextjs
 
-# Expose port
-EXPOSE 80
+EXPOSE 3000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost/ || exit 1
+ENV PORT 3000
 
-# Start nginx
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["node", "server.js"]

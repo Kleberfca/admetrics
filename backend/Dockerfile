@@ -1,64 +1,34 @@
-# Build stage
-FROM node:18-alpine AS builder
-
-# Install build dependencies
-RUN apk add --no-cache python3 make g++
+# Backend Dockerfile
+FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
-COPY prisma ./prisma/
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    postgresql-client \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
-RUN npm ci --only=production && \
-    npm cache clean --force
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
+# Copy application code
 COPY . .
 
-# Generate Prisma client
-RUN npx prisma generate
-
-# Build TypeScript
-RUN npm run build
-
-# Production stage
-FROM node:18-alpine
-
-# Install dumb-init for proper signal handling
-RUN apk add --no-cache dumb-init
-
 # Create non-root user
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001
-
-# Set working directory
-WORKDIR /app
-
-# Copy built application from builder
-COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
-COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
-COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
-COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
-
-# Create logs and uploads directories
-RUN mkdir -p logs uploads && \
-    chown -R nodejs:nodejs logs uploads
-
-# Switch to non-root user
-USER nodejs
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
 
 # Expose port
-EXPOSE 3000
+EXPOSE 8000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1); })"
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
 
-# Run with dumb-init to handle signals properly
-ENTRYPOINT ["dumb-init", "--"]
-
-# Start the application
-CMD ["node", "dist/app.js"]
+# Default command (can be overridden)
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
