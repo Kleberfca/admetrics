@@ -1,230 +1,120 @@
 import Redis from 'ioredis';
 import { logger } from '../utils/logger';
 
-// Redis client configuration
-const redisConfig = {
+// Create Redis client
+const redis = new Redis({
   host: process.env.REDIS_HOST || 'localhost',
-  port: parseInt(process.env.REDIS_PORT || '6379'),
+  port: parseInt(process.env.REDIS_PORT || '6379', 10),
   password: process.env.REDIS_PASSWORD,
-  db: parseInt(process.env.REDIS_DB || '0'),
-  keyPrefix: process.env.REDIS_PREFIX || 'admetrics:',
+  db: 0,
   retryStrategy: (times: number) => {
     const delay = Math.min(times * 50, 2000);
     return delay;
   },
-  reconnectOnError: (err: Error) => {
-    const targetError = 'READONLY';
-    if (err.message.includes(targetError)) {
-      // Only reconnect when the error contains "READONLY"
-      return true;
-    }
-    return false;
-  },
   maxRetriesPerRequest: 3,
-  enableReadyCheck: true,
-  enableOfflineQueue: true
-};
-
-// Create Redis client
-export const redisClient = new Redis(redisConfig);
-
-// Create separate client for pub/sub
-export const redisPubClient = new Redis(redisConfig);
-export const redisSubClient = new Redis(redisConfig);
-
-// Handle Redis connection events
-redisClient.on('connect', () => {
-  logger.info('Redis client connected');
 });
 
-redisClient.on('ready', () => {
-  logger.info('Redis client ready');
+// Redis event handlers
+redis.on('connect', () => {
+  logger.info('Redis connected successfully');
 });
 
-redisClient.on('error', (err) => {
-  logger.error('Redis client error:', err);
+redis.on('error', (error) => {
+  logger.error('Redis connection error:', error);
 });
 
-redisClient.on('close', () => {
-  logger.warn('Redis client connection closed');
+redis.on('close', () => {
+  logger.warn('Redis connection closed');
 });
 
-redisClient.on('reconnecting', (delay: number) => {
-  logger.info(`Redis client reconnecting in ${delay}ms`);
-});
-
-// Cache helpers
+// Cache manager class for consistent caching patterns
 export class CacheManager {
-  private static DEFAULT_TTL = 3600; // 1 hour
+  private static instance: CacheManager;
+  private defaultTTL: number = 3600; // 1 hour
 
-  /**
-   * Get value from cache
-   */
-  static async get<T>(key: string): Promise<T | null> {
+  private constructor() {}
+
+  static getInstance(): CacheManager {
+    if (!CacheManager.instance) {
+      CacheManager.instance = new CacheManager();
+    }
+    return CacheManager.instance;
+  }
+
+  async get<T>(key: string): Promise<T | null> {
     try {
-      const value = await redisClient.get(key);
-      return value ? JSON.parse(value) : null;
+      const value = await redis.get(key);
+      if (value) {
+        return JSON.parse(value);
+      }
+      return null;
     } catch (error) {
       logger.error('Cache get error:', error);
       return null;
     }
   }
 
-  /**
-   * Set value in cache
-   */
-  static async set(key: string, value: any, ttl?: number): Promise<boolean> {
+  async set(key: string, value: any, ttl?: number): Promise<void> {
     try {
       const serialized = JSON.stringify(value);
       if (ttl) {
-        await redisClient.setex(key, ttl, serialized);
+        await redis.setex(key, ttl, serialized);
       } else {
-        await redisClient.setex(key, this.DEFAULT_TTL, serialized);
+        await redis.setex(key, this.defaultTTL, serialized);
       }
-      return true;
     } catch (error) {
       logger.error('Cache set error:', error);
-      return false;
     }
   }
 
-  /**
-   * Delete value from cache
-   */
-  static async delete(key: string): Promise<boolean> {
+  async delete(key: string): Promise<void> {
     try {
-      await redisClient.del(key);
-      return true;
+      await redis.del(key);
     } catch (error) {
       logger.error('Cache delete error:', error);
-      return false;
     }
   }
 
-  /**
-   * Delete multiple keys by pattern
-   */
-  static async deletePattern(pattern: string): Promise<number> {
+  async deletePattern(pattern: string): Promise<void> {
     try {
-      const keys = await redisClient.keys(pattern);
+      const keys = await redis.keys(pattern);
       if (keys.length > 0) {
-        return await redisClient.del(...keys);
+        await redis.del(...keys);
       }
-      return 0;
     } catch (error) {
       logger.error('Cache delete pattern error:', error);
-      return 0;
     }
   }
 
-  /**
-   * Check if key exists
-   */
-  static async exists(key: string): Promise<boolean> {
+  async flush(): Promise<void> {
     try {
-      const exists = await redisClient.exists(key);
-      return exists === 1;
+      await redis.flushdb();
     } catch (error) {
-      logger.error('Cache exists error:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Get remaining TTL for a key
-   */
-  static async ttl(key: string): Promise<number> {
-    try {
-      return await redisClient.ttl(key);
-    } catch (error) {
-      logger.error('Cache TTL error:', error);
-      return -1;
-    }
-  }
-
-  /**
-   * Increment counter
-   */
-  static async increment(key: string, amount: number = 1): Promise<number> {
-    try {
-      return await redisClient.incrby(key, amount);
-    } catch (error) {
-      logger.error('Cache increment error:', error);
-      return 0;
-    }
-  }
-
-  /**
-   * Set hash field
-   */
-  static async hset(key: string, field: string, value: any): Promise<boolean> {
-    try {
-      await redisClient.hset(key, field, JSON.stringify(value));
-      return true;
-    } catch (error) {
-      logger.error('Cache hset error:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Get hash field
-   */
-  static async hget<T>(key: string, field: string): Promise<T | null> {
-    try {
-      const value = await redisClient.hget(key, field);
-      return value ? JSON.parse(value) : null;
-    } catch (error) {
-      logger.error('Cache hget error:', error);
-      return null;
-    }
-  }
-
-  /**
-   * Get all hash fields
-   */
-  static async hgetall<T>(key: string): Promise<Record<string, T> | null> {
-    try {
-      const hash = await redisClient.hgetall(key);
-      const result: Record<string, T> = {};
-      
-      for (const [field, value] of Object.entries(hash)) {
-        result[field] = JSON.parse(value);
-      }
-      
-      return Object.keys(result).length > 0 ? result : null;
-    } catch (error) {
-      logger.error('Cache hgetall error:', error);
-      return null;
+      logger.error('Cache flush error:', error);
     }
   }
 }
 
-// Cache decorator
-export function Cacheable(options: { key: string; ttl?: number } | ((target: any, propertyKey: string, ...args: any[]) => { key: string; ttl?: number })) {
-  return function (target: any, propertyKey: string, descriptor: PropertyDescriptor) {
+// Decorator for caching
+export function Cacheable(keyPrefix: string, ttl?: number) {
+  return function (target: any, propertyName: string, descriptor: PropertyDescriptor) {
     const originalMethod = descriptor.value;
 
     descriptor.value = async function (...args: any[]) {
-      const cacheOptions = typeof options === 'function' 
-        ? options(target, propertyKey, ...args)
-        : options;
+      const cache = CacheManager.getInstance();
+      const cacheKey = `${keyPrefix}:${JSON.stringify(args)}`;
 
-      const cacheKey = cacheOptions.key;
-      
       // Try to get from cache
-      const cached = await CacheManager.get(cacheKey);
-      if (cached !== null) {
-        logger.debug(`Cache hit for key: ${cacheKey}`);
-        return cached;
+      const cachedResult = await cache.get(cacheKey);
+      if (cachedResult !== null) {
+        return cachedResult;
       }
 
       // Execute original method
       const result = await originalMethod.apply(this, args);
 
-      // Store in cache
-      await CacheManager.set(cacheKey, result, cacheOptions.ttl);
-      logger.debug(`Cache set for key: ${cacheKey}`);
+      // Cache the result
+      await cache.set(cacheKey, result, ttl);
 
       return result;
     };
@@ -233,21 +123,14 @@ export function Cacheable(options: { key: string; ttl?: number } | ((target: any
   };
 }
 
-// Export Redis manager for connection management
-export const redisManager = {
-  async connect(): Promise<void> {
-    await redisClient.ping();
-    logger.info('Redis connection established');
-  },
-
-  async disconnect(): Promise<void> {
-    await redisClient.quit();
-    await redisPubClient.quit();
-    await redisSubClient.quit();
-    logger.info('Redis connections closed');
-  },
-
-  isConnected(): boolean {
-    return redisClient.status === 'ready';
+export async function connectRedis(): Promise<void> {
+  try {
+    await redis.ping();
+    logger.info('Redis connection verified');
+  } catch (error) {
+    logger.error('Redis connection failed:', error);
+    throw error;
   }
-};
+}
+
+export { redis };

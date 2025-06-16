@@ -1,12 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../config/database';
 import { logger } from '../utils/logger';
-import { redisClient } from '../config/redis';
 
-const prisma = new PrismaClient();
+interface JwtPayload {
+  userId: string;
+  email: string;
+  role: string;
+}
 
-// Extend Express Request type
+// Extend Request interface to include user
 declare global {
   namespace Express {
     interface Request {
@@ -14,179 +17,124 @@ declare global {
         id: string;
         email: string;
         role: string;
-        permissions?: string[];
       };
-      token?: string;
     }
   }
 }
 
-/**
- * Authenticate user from JWT token
- */
 export const authenticate = async (
   req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
   try {
-    // Extract token from header
+    // Get token from header
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      res.status(401).json({
-        success: false,
-        message: 'No token provided'
-      });
-      return;
-    }
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
 
-    const token = authHeader.substring(7);
-    req.token = token;
-
-    // Check if token is blacklisted
-    const isBlacklisted = await redisClient.get(`blacklist:${token}`);
-    if (isBlacklisted) {
-      res.status(401).json({
-        success: false,
-        message: 'Token has been revoked'
-      });
+    if (!token) {
+      res.status(401).json({ error: 'No token provided' });
       return;
     }
 
     // Verify token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
+    const decoded = jwt.verify(
+      token,
+      process.env.JWT_SECRET || 'default-secret'
+    ) as JwtPayload;
 
-    // Get user from database
+    // Check if user exists and is active
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
       select: {
         id: true,
         email: true,
         role: true,
-        status: true,
-        permissions: {
-          select: {
-            permission: true
-          }
-        }
+        status: true
       }
     });
 
-    if (!user) {
-      res.status(401).json({
-        success: false,
-        message: 'User not found'
-      });
+    if (!user || user.status !== 'ACTIVE') {
+      res.status(401).json({ error: 'Invalid token or user inactive' });
       return;
     }
 
-    if (user.status !== 'ACTIVE') {
-      res.status(401).json({
-        success: false,
-        message: 'Account is not active'
-      });
-      return;
-    }
-
-    // Attach user to request
+    // Add user to request
     req.user = {
       id: user.id,
       email: user.email,
-      role: user.role,
-      permissions: user.permissions.map(p => p.permission)
+      role: user.role
     };
 
     next();
   } catch (error) {
     if (error instanceof jwt.TokenExpiredError) {
-      res.status(401).json({
-        success: false,
-        message: 'Token has expired'
-      });
+      res.status(401).json({ error: 'Token expired' });
       return;
     }
-
     if (error instanceof jwt.JsonWebTokenError) {
-      res.status(401).json({
-        success: false,
-        message: 'Invalid token'
-      });
+      res.status(401).json({ error: 'Invalid token' });
       return;
     }
-
+    
     logger.error('Authentication error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Authentication failed'
-    });
+    res.status(500).json({ error: 'Authentication failed' });
   }
 };
 
-/**
- * Check if user has required role
- */
-export const authorize = (roles: string[]) => {
-  return (req: Request, res: Response, next: NextFunction): void => {
+// Middleware to check user roles
+export const authorize = (...roles: string[]) => {
+  return (req: Request, res: Response, next: NextFunction) => {
     if (!req.user) {
-      res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-      return;
+      return res.status(401).json({ error: 'Not authenticated' });
     }
 
     if (!roles.includes(req.user.role)) {
-      res.status(403).json({
-        success: false,
-        message: 'Insufficient permissions'
-      });
-      return;
+      return res.status(403).json({ error: 'Insufficient permissions' });
     }
 
     next();
   };
 };
 
-/**
- * Check if user has required permission
- */
-export const requirePermission = (permission: string) => {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    if (!req.user) {
-      res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-      return;
-    }
-
-    if (!req.user.permissions?.includes(permission)) {
-      res.status(403).json({
-        success: false,
-        message: `Permission required: ${permission}`
-      });
-      return;
-    }
-
-    next();
-  };
-};
-
-/**
- * Optional authentication - continues if no token present
- */
+// Optional authentication - doesn't fail if no token
 export const optionalAuth = async (
   req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
-  const authHeader = req.headers.authorization;
-  
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    next();
-    return;
-  }
+  try {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
 
-  // If token is present, validate it
-  authenticate(req, res, next);
+    if (token) {
+      const decoded = jwt.verify(
+        token,
+        process.env.JWT_SECRET || 'default-secret'
+      ) as JwtPayload;
+
+      const user = await prisma.user.findUnique({
+        where: { id: decoded.userId },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          status: true
+        }
+      });
+
+      if (user && user.status === 'ACTIVE') {
+        req.user = {
+          id: user.id,
+          email: user.email,
+          role: user.role
+        };
+      }
+    }
+
+    next();
+  } catch (error) {
+    // Continue without authentication
+    next();
+  }
 };

@@ -1,6 +1,5 @@
 import winston from 'winston';
-import 'winston-daily-rotate-file';
-import { Request } from 'express';
+import DailyRotateFile from 'winston-daily-rotate-file';
 import path from 'path';
 
 // Define log levels
@@ -9,23 +8,28 @@ const levels = {
   warn: 1,
   info: 2,
   http: 3,
-  debug: 4
+  verbose: 4,
+  debug: 5,
+  silly: 6
 };
 
-// Define log colors
+// Define colors for each level
 const colors = {
   error: 'red',
   warn: 'yellow',
   info: 'green',
   http: 'magenta',
-  debug: 'blue'
+  verbose: 'cyan',
+  debug: 'blue',
+  silly: 'gray'
 };
 
+// Tell winston about the colors
 winston.addColors(colors);
 
 // Define log format
 const format = winston.format.combine(
-  winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss:ms' }),
+  winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
   winston.format.errors({ stack: true }),
   winston.format.splat(),
   winston.format.json()
@@ -35,35 +39,31 @@ const format = winston.format.combine(
 const consoleFormat = winston.format.combine(
   winston.format.colorize({ all: true }),
   winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-  winston.format.printf(info => {
-    const { timestamp, level, message, ...meta } = info;
-    let metaString = '';
-    
+  winston.format.align(),
+  winston.format.printf(({ timestamp, level, message, ...meta }) => {
+    let msg = `${timestamp} [${level}]: ${message}`;
     if (Object.keys(meta).length > 0) {
-      metaString = '\n' + JSON.stringify(meta, null, 2);
+      msg += ` ${JSON.stringify(meta)}`;
     }
-    
-    return `${timestamp} [${level}]: ${message}${metaString}`;
+    return msg;
   })
 );
 
 // Define transports
 const transports: winston.transport[] = [];
 
-// Console transport for all environments
-if (process.env.NODE_ENV !== 'test') {
-  transports.push(
-    new winston.transports.Console({
-      format: process.env.NODE_ENV === 'production' ? format : consoleFormat
-    })
-  );
-}
+// Console transport (always enabled)
+transports.push(
+  new winston.transports.Console({
+    format: process.env.NODE_ENV === 'development' ? consoleFormat : format
+  })
+);
 
-// File transports for production
+// File transports (production only)
 if (process.env.NODE_ENV === 'production') {
-  // Error logs
+  // Error log file
   transports.push(
-    new winston.transports.DailyRotateFile({
+    new DailyRotateFile({
       filename: path.join('logs', 'error-%DATE%.log'),
       datePattern: 'YYYY-MM-DD',
       zippedArchive: true,
@@ -73,9 +73,9 @@ if (process.env.NODE_ENV === 'production') {
     })
   );
 
-  // Combined logs
+  // Combined log file
   transports.push(
-    new winston.transports.DailyRotateFile({
+    new DailyRotateFile({
       filename: path.join('logs', 'combined-%DATE%.log'),
       datePattern: 'YYYY-MM-DD',
       zippedArchive: true,
@@ -87,99 +87,48 @@ if (process.env.NODE_ENV === 'production') {
 
 // Create logger instance
 const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'info' : 'debug'),
+  level: process.env.LOG_LEVEL || (process.env.NODE_ENV === 'development' ? 'debug' : 'info'),
   levels,
   format,
   transports,
   exitOnError: false
 });
 
-// Stream for Morgan HTTP logger
-export const loggerStream = {
+// Create a stream object for Morgan HTTP logging
+export const stream = {
   write: (message: string) => {
     logger.http(message.trim());
   }
 };
 
-// Request logger middleware
-export const requestLogger = (req: Request, res: any, next: any) => {
-  const start = Date.now();
-  
-  // Log request
-  logger.http('Incoming request', {
-    method: req.method,
-    url: req.originalUrl,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-    userId: req.user?.id
-  });
-
-  // Log response
-  const originalSend = res.send;
-  res.send = function(data: any) {
-    const duration = Date.now() - start;
-    
-    logger.http('Outgoing response', {
-      method: req.method,
-      url: req.originalUrl,
-      statusCode: res.statusCode,
-      duration: `${duration}ms`,
-      userId: req.user?.id
-    });
-
-    originalSend.call(this, data);
-  };
-
-  next();
-};
-
-// Structured logging helpers
-export const logInfo = (message: string, meta?: any) => {
-  logger.info(message, meta);
-};
-
-export const logError = (message: string, error?: any, meta?: any) => {
-  logger.error(message, {
-    ...meta,
-    error: error?.message,
-    stack: error?.stack,
-    code: error?.code
+// Helper functions for structured logging
+export const logError = (error: Error, context?: any) => {
+  logger.error({
+    message: error.message,
+    stack: error.stack,
+    ...context
   });
 };
 
-export const logWarn = (message: string, meta?: any) => {
-  logger.warn(message, meta);
-};
-
-export const logDebug = (message: string, meta?: any) => {
-  logger.debug(message, meta);
-};
-
-// Performance logging
-export const logPerformance = (operation: string, duration: number, meta?: any) => {
-  const level = duration > 1000 ? 'warn' : 'info';
-  logger[level](`Performance: ${operation}`, {
-    duration: `${duration}ms`,
-    ...meta
+export const logInfo = (message: string, context?: any) => {
+  logger.info({
+    message,
+    ...context
   });
 };
 
-// Audit logging
-export const logAudit = (action: string, userId: string, meta?: any) => {
-  logger.info(`Audit: ${action}`, {
-    userId,
-    timestamp: new Date().toISOString(),
-    ...meta
+export const logWarning = (message: string, context?: any) => {
+  logger.warn({
+    message,
+    ...context
   });
 };
 
-// Security logging
-export const logSecurity = (event: string, meta?: any) => {
-  logger.warn(`Security: ${event}`, {
-    timestamp: new Date().toISOString(),
-    ...meta
+export const logDebug = (message: string, context?: any) => {
+  logger.debug({
+    message,
+    ...context
   });
 };
 
-// Export logger instance
 export { logger };
