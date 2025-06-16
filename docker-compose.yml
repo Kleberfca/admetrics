@@ -57,7 +57,7 @@ services:
         condition: service_healthy
     command: npm run dev
 
-  # AI Engine
+# AI Engine
   ai-engine:
     build:
       context: ./ai-engine
@@ -65,16 +65,27 @@ services:
     container_name: admetrics_ai_engine
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis123}@redis:6379
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis123}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB:-admetrics}
+      - DB_USER=${POSTGRES_USER:-admetrics}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-admetrics123}
       - MODEL_CACHE_DIR=/app/models
+      - FLASK_ENV=${ENVIRONMENT:-development}
     volumes:
       - ./ai-engine:/app
       - ai_models:/app/models
     ports:
-      - "8001:8001"
+      - "5000:5000"
     depends_on:
       redis:
         condition: service_healthy
-    command: uvicorn src.main:app --host 0.0.0.0 --port 8001 --reload
+      postgres:
+        condition: service_healthy
+    command: python src/api/app.py
 
   # Frontend
   frontend:
