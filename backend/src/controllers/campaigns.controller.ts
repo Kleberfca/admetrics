@@ -1,79 +1,50 @@
 import { Request, Response, NextFunction } from 'express';
-import { CampaignsService } from '../services/campaigns.service';
-import { MetricsService } from '../services/metrics.service';
-import { AIInsightsService } from '../services/ai-insights.service';
-import { NotFoundError, ValidationError } from '../middleware/error.middleware';
+import { CampaignService } from '../services/campaign.service';
+import { AIService } from '../services/ai.service';
+import { WebSocketService } from '../services/websocket.service';
+import { NotFoundError, ValidationError, ForbiddenError } from '../middleware/error.middleware';
 import { logger } from '../utils/logger';
-import { paginate } from '../config/database';
-import { prisma } from '../config/database';
 
-export class CampaignsController {
-  private static campaignsService = new CampaignsService();
-  private static metricsService = new MetricsService();
-  private static aiInsightsService = new AIInsightsService();
+export class CampaignController {
+  private static campaignService = new CampaignService();
+  private static aiService = new AIService();
+  private static wsService = WebSocketService.getInstance();
 
   /**
-   * Get campaigns list with pagination and filters
+   * List campaigns with pagination and filters
    */
-  static async getCampaigns(req: Request, res: Response, next: NextFunction): Promise<void> {
+  static async listCampaigns(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const userId = req.user!.id;
-      const { 
-        page = 1, 
-        limit = 20, 
-        platforms, 
-        status, 
-        search, 
-        sortBy = 'updatedAt', 
-        sortOrder = 'desc' 
+      const {
+        page = '1',
+        limit = '20',
+        platform,
+        status,
+        search,
+        sortBy = 'createdAt',
+        sortOrder = 'desc'
       } = req.query;
 
-      // Build where clause
-      const where: any = {
+      const campaigns = await CampaignController.campaignService.listCampaigns({
         userId,
-        deletedAt: null,
-        ...(platforms && { platform: { in: platforms as string[] } }),
-        ...(status && { status }),
-        ...(search && {
-          OR: [
-            { name: { contains: search as string, mode: 'insensitive' } },
-            { externalId: { contains: search as string, mode: 'insensitive' } }
-          ]
-        })
-      };
-
-      // Get paginated campaigns
-      const result = await paginate(prisma.campaign, {
-        where,
-        include: {
-          integration: {
-            select: {
-              id: true,
-              name: true,
-              platform: true,
-              status: true
-            }
-          },
-          _count: {
-            select: {
-              metrics: true,
-              alerts: true,
-              aiInsights: {
-                where: { isRead: false }
-              }
-            }
-          }
+        page: parseInt(page as string),
+        limit: parseInt(limit as string),
+        filters: {
+          platform: platform as string,
+          status: status as string,
+          search: search as string
         },
-        page: Number(page),
-        limit: Number(limit),
-        sortBy: sortBy as string,
-        sortOrder: sortOrder as 'asc' | 'desc'
+        sort: {
+          field: sortBy as string,
+          order: sortOrder as 'asc' | 'desc'
+        }
       });
 
       res.json({
         success: true,
-        data: result.data,
-        meta: result.meta
+        data: campaigns.data,
+        pagination: campaigns.pagination
       });
     } catch (error) {
       next(error);
@@ -88,7 +59,7 @@ export class CampaignsController {
       const { id } = req.params;
       const userId = req.user!.id;
 
-      const campaign = await CampaignsController.campaignsService.getCampaignById(id, userId);
+      const campaign = await CampaignController.campaignService.getCampaignById(id, userId);
 
       if (!campaign) {
         throw new NotFoundError('Campaign not found');
@@ -104,24 +75,27 @@ export class CampaignsController {
   }
 
   /**
-   * Create a new campaign
+   * Create new campaign
    */
   static async createCampaign(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const userId = req.user!.id;
       const campaignData = req.body;
 
-      const campaign = await CampaignsController.campaignsService.createCampaign({
+      const campaign = await CampaignController.campaignService.createCampaign({
         ...campaignData,
         userId
       });
 
-      logger.info('Campaign created', { campaignId: campaign.id, userId });
+      // Emit WebSocket event
+      CampaignController.wsService.emitToUser(userId, 'campaign:created', {
+        campaign
+      });
 
       res.status(201).json({
         success: true,
-        message: 'Campaign created successfully',
-        data: campaign
+        data: campaign,
+        message: 'Campaign created successfully'
       });
     } catch (error) {
       next(error);
@@ -137,18 +111,22 @@ export class CampaignsController {
       const userId = req.user!.id;
       const updates = req.body;
 
-      const campaign = await CampaignsController.campaignsService.updateCampaign(
+      const campaign = await CampaignController.campaignService.updateCampaign(
         id,
         userId,
         updates
       );
 
-      logger.info('Campaign updated', { campaignId: id, userId });
+      // Emit WebSocket event
+      CampaignController.wsService.emitToUser(userId, 'campaign:updated', {
+        campaignId: id,
+        updates
+      });
 
       res.json({
         success: true,
-        message: 'Campaign updated successfully',
-        data: campaign
+        data: campaign,
+        message: 'Campaign updated successfully'
       });
     } catch (error) {
       next(error);
@@ -163,9 +141,12 @@ export class CampaignsController {
       const { id } = req.params;
       const userId = req.user!.id;
 
-      await CampaignsController.campaignsService.deleteCampaign(id, userId);
+      await CampaignController.campaignService.deleteCampaign(id, userId);
 
-      logger.info('Campaign deleted', { campaignId: id, userId });
+      // Emit WebSocket event
+      CampaignController.wsService.emitToUser(userId, 'campaign:deleted', {
+        campaignId: id
+      });
 
       res.json({
         success: true,
@@ -184,18 +165,16 @@ export class CampaignsController {
       const { id } = req.params;
       const userId = req.user!.id;
 
-      const campaign = await CampaignsController.campaignsService.updateCampaignStatus(
+      const campaign = await CampaignController.campaignService.updateCampaignStatus(
         id,
         userId,
         'PAUSED'
       );
 
-      logger.info('Campaign paused', { campaignId: id, userId });
-
       res.json({
         success: true,
-        message: 'Campaign paused successfully',
-        data: campaign
+        data: campaign,
+        message: 'Campaign paused successfully'
       });
     } catch (error) {
       next(error);
@@ -210,18 +189,16 @@ export class CampaignsController {
       const { id } = req.params;
       const userId = req.user!.id;
 
-      const campaign = await CampaignsController.campaignsService.updateCampaignStatus(
+      const campaign = await CampaignController.campaignService.updateCampaignStatus(
         id,
         userId,
         'ACTIVE'
       );
 
-      logger.info('Campaign resumed', { campaignId: id, userId });
-
       res.json({
         success: true,
-        message: 'Campaign resumed successfully',
-        data: campaign
+        data: campaign,
+        message: 'Campaign resumed successfully'
       });
     } catch (error) {
       next(error);
@@ -229,55 +206,52 @@ export class CampaignsController {
   }
 
   /**
-   * Sync campaign data
+   * Duplicate campaign
    */
-  static async syncCampaign(req: Request, res: Response, next: NextFunction): Promise<void> {
+  static async duplicateCampaign(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = req.params;
       const userId = req.user!.id;
+      const { name } = req.body;
 
-      // Start sync process (async)
-      CampaignsController.campaignsService.syncCampaign(id, userId)
-        .then(() => {
-          logger.info('Campaign sync completed', { campaignId: id, userId });
-        })
-        .catch((error) => {
-          logger.error('Campaign sync failed', { campaignId: id, userId, error });
-        });
-
-      res.json({
-        success: true,
-        message: 'Campaign sync initiated. You will be notified when complete.'
-      });
-    } catch (error) {
-      next(error);
-    }
-  }
-
-  /**
-   * Get campaign metrics
-   */
-  static async getCampaignMetrics(req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      const { id } = req.params;
-      const userId = req.user!.id;
-      const { startDate, endDate, granularity = 'day' } = req.query;
-
-      if (!startDate || !endDate) {
-        throw new ValidationError('Start date and end date are required');
-      }
-
-      const metrics = await CampaignsController.metricsService.getCampaignMetrics(
+      const campaign = await CampaignController.campaignService.duplicateCampaign(
         id,
         userId,
-        new Date(startDate as string),
-        new Date(endDate as string),
-        granularity as any
+        name
+      );
+
+      res.status(201).json({
+        success: true,
+        data: campaign,
+        message: 'Campaign duplicated successfully'
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Bulk pause campaigns
+   */
+  static async bulkPauseCampaigns(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const userId = req.user!.id;
+      const { campaignIds } = req.body;
+
+      if (!Array.isArray(campaignIds) || campaignIds.length === 0) {
+        throw new ValidationError('Campaign IDs array is required');
+      }
+
+      const results = await CampaignController.campaignService.bulkUpdateStatus(
+        campaignIds,
+        userId,
+        'PAUSED'
       );
 
       res.json({
         success: true,
-        data: metrics
+        data: results,
+        message: `${results.updated} campaigns paused successfully`
       });
     } catch (error) {
       next(error);
@@ -285,21 +259,104 @@ export class CampaignsController {
   }
 
   /**
-   * Get campaign AI insights
+   * Get campaign insights
    */
   static async getCampaignInsights(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = req.params;
       const userId = req.user!.id;
 
-      const insights = await CampaignsController.aiInsightsService.getCampaignInsights(
+      const [campaign, insights] = await Promise.all([
+        CampaignController.campaignService.getCampaignById(id, userId),
+        CampaignController.aiService.getCampaignInsights(id)
+      ]);
+
+      if (!campaign) {
+        throw new NotFoundError('Campaign not found');
+      }
+
+      res.json({
+        success: true,
+        data: insights
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Get campaign performance
+   */
+  static async getCampaignPerformance(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { id } = req.params;
+      const userId = req.user!.id;
+      const { period = '7d' } = req.query;
+
+      const performance = await CampaignController.campaignService.getCampaignPerformance(
         id,
+        userId,
+        period as string
+      );
+
+      res.json({
+        success: true,
+        data: performance
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Bulk resume campaigns
+   */
+  static async bulkResumeCampaigns(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const userId = req.user!.id;
+      const { campaignIds } = req.body;
+
+      if (!Array.isArray(campaignIds) || campaignIds.length === 0) {
+        throw new ValidationError('Campaign IDs array is required');
+      }
+
+      const results = await CampaignController.campaignService.bulkUpdateStatus(
+        campaignIds,
+        userId,
+        'ACTIVE'
+      );
+
+      res.json({
+        success: true,
+        data: results,
+        message: `${results.updated} campaigns resumed successfully`
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Bulk delete campaigns
+   */
+  static async bulkDeleteCampaigns(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const userId = req.user!.id;
+      const { campaignIds } = req.body;
+
+      if (!Array.isArray(campaignIds) || campaignIds.length === 0) {
+        throw new ValidationError('Campaign IDs array is required');
+      }
+
+      const results = await CampaignController.campaignService.bulkDelete(
+        campaignIds,
         userId
       );
 
       res.json({
         success: true,
-        data: insights
+        data: results,
+        message: `${results.deleted} campaigns deleted successfully`
       });
     } catch (error) {
       next(error);

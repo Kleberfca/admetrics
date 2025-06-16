@@ -1,79 +1,143 @@
 import { Campaign, CampaignStatus, Platform, Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
-import { NotFoundError, ForbiddenError, ValidationError } from '../middleware/error.middleware';
-import { PlatformManagerService } from './integrations/platform-manager.service';
 import { CacheManager } from '../config/redis';
 import { logger } from '../utils/logger';
-import { EventEmitter } from 'events';
+import { NotFoundError, ForbiddenError, ConflictError } from '../middleware/error.middleware';
+import { PlatformManagerService } from './integrations/platform-manager.service';
 
-interface CreateCampaignData {
+interface ListCampaignsOptions {
   userId: string;
-  integrationId: string;
-  name: string;
-  platform: Platform;
-  objective?: string;
-  budget?: number;
-  budgetType?: 'DAILY' | 'LIFETIME';
-  startDate?: Date;
-  endDate?: Date;
-  targeting?: any;
-  geoTargeting?: any;
+  page: number;
+  limit: number;
+  filters?: {
+    platform?: string;
+    status?: string;
+    search?: string;
+  };
+  sort?: {
+    field: string;
+    order: 'asc' | 'desc';
+  };
 }
 
-interface UpdateCampaignData {
-  name?: string;
-  status?: CampaignStatus;
-  objective?: string;
-  budget?: number;
-  budgetType?: 'DAILY' | 'LIFETIME';
-  startDate?: Date;
-  endDate?: Date;
-  targeting?: any;
-  geoTargeting?: any;
+interface CampaignPerformance {
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  spend: number;
+  ctr: number;
+  cvr: number;
+  cpc: number;
+  cpa: number;
+  roas: number;
+  trend: {
+    spend: number;
+    conversions: number;
+    roas: number;
+  };
 }
 
-export class CampaignsService extends EventEmitter {
+export class CampaignService {
+  private cache: CacheManager;
   private platformManager: PlatformManagerService;
 
   constructor() {
-    super();
+    this.cache = CacheManager.getInstance();
     this.platformManager = new PlatformManagerService();
+  }
+
+  /**
+   * List campaigns with pagination and filters
+   */
+  async listCampaigns(options: ListCampaignsOptions) {
+    const { userId, page, limit, filters, sort } = options;
+    const skip = (page - 1) * limit;
+
+    // Build where clause
+    const where: Prisma.CampaignWhereInput = {
+      userId,
+      deletedAt: null
+    };
+
+    if (filters?.platform) {
+      where.platform = filters.platform as Platform;
+    }
+
+    if (filters?.status) {
+      where.status = filters.status as CampaignStatus;
+    }
+
+    if (filters?.search) {
+      where.name = {
+        contains: filters.search,
+        mode: 'insensitive'
+      };
+    }
+
+    // Build order by
+    const orderBy: Prisma.CampaignOrderByWithRelationInput = {};
+    if (sort) {
+      orderBy[sort.field as keyof Campaign] = sort.order;
+    }
+
+    // Execute queries
+    const [campaigns, total] = await Promise.all([
+      prisma.campaign.findMany({
+        where,
+        orderBy,
+        skip,
+        take: limit,
+        include: {
+          integration: {
+            select: {
+              id: true,
+              name: true,
+              platform: true,
+              status: true
+            }
+          },
+          _count: {
+            select: {
+              metrics: true,
+              alerts: true
+            }
+          }
+        }
+      }),
+      prisma.campaign.count({ where })
+    ]);
+
+    return {
+      data: campaigns,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit)
+      }
+    };
   }
 
   /**
    * Get campaign by ID
    */
-  async getCampaignById(id: string, userId: string): Promise<Campaign | null> {
+  async getCampaignById(campaignId: string, userId: string) {
     const campaign = await prisma.campaign.findFirst({
       where: {
-        id,
+        id: campaignId,
         userId,
         deletedAt: null
       },
       include: {
-        integration: {
-          select: {
-            id: true,
-            name: true,
-            platform: true,
-            status: true
-          }
-        },
+        integration: true,
         metrics: {
-          orderBy: {
-            date: 'desc'
-          },
+          orderBy: { date: 'desc' },
           take: 30
         },
-        _count: {
-          select: {
-            alerts: {
-              where: { isRead: false }
-            },
-            aiInsights: {
-              where: { isRead: false }
-            }
-          }
+        alerts: {
+          where: { isResolved: false },
+          orderBy: { createdAt: 'desc' },
+          take: 5
         }
       }
     });
@@ -82,14 +146,14 @@ export class CampaignsService extends EventEmitter {
   }
 
   /**
-   * Create a new campaign
+   * Create new campaign
    */
-  async createCampaign(data: CreateCampaignData): Promise<Campaign> {
-    // Validate integration ownership
+  async createCampaign(data: Prisma.CampaignCreateInput) {
+    // Verify integration ownership
     const integration = await prisma.integration.findFirst({
       where: {
-        id: data.integrationId,
-        userId: data.userId,
+        id: data.integration.connect?.id,
+        userId: data.user.connect?.id,
         deletedAt: null
       }
     });
@@ -98,352 +162,293 @@ export class CampaignsService extends EventEmitter {
       throw new NotFoundError('Integration not found');
     }
 
-    if (integration.status !== 'ACTIVE') {
-      throw new ValidationError('Integration is not active');
+    // Create campaign
+    const campaign = await prisma.campaign.create({
+      data,
+      include: {
+        integration: true
+      }
+    });
+
+    // Sync with platform if active
+    if (campaign.status === 'ACTIVE') {
+      await this.syncWithPlatform(campaign);
     }
 
-    // Create campaign in platform
-    try {
-      const platformService = await this.platformManager.getPlatformService(integration);
-      const externalCampaign = await platformService.createCampaign({
-        name: data.name,
-        objective: data.objective,
-        budget: data.budget,
-        budgetType: data.budgetType,
-        startDate: data.startDate,
-        endDate: data.endDate,
-        targeting: data.targeting,
-        geoTargeting: data.geoTargeting
-      });
+    // Clear cache
+    await this.cache.deletePattern(`campaigns:${data.user.connect?.id}:*`);
 
-      // Create campaign in database
-      const campaign = await prisma.campaign.create({
-        data: {
-          userId: data.userId,
-          integrationId: data.integrationId,
-          platform: integration.platform,
-          externalId: externalCampaign.id,
-          name: data.name,
-          status: 'DRAFT',
-          objective: data.objective,
-          budget: data.budget,
-          budgetType: data.budgetType,
-          startDate: data.startDate,
-          endDate: data.endDate,
-          targeting: data.targeting,
-          geoTargeting: data.geoTargeting,
-          creatives: externalCampaign.creatives || []
-        },
-        include: {
-          integration: true
-        }
-      });
-
-      // Emit event
-      this.emit('campaign:created', campaign);
-
-      // Invalidate cache
-      await CacheManager.deletePattern(`campaigns:${data.userId}:*`);
-
-      return campaign;
-    } catch (error) {
-      logger.error('Failed to create campaign in platform', error);
-      throw new ValidationError('Failed to create campaign in advertising platform');
-    }
+    return campaign;
   }
 
   /**
    * Update campaign
    */
-  async updateCampaign(
-    id: string, 
-    userId: string, 
-    updates: UpdateCampaignData
-  ): Promise<Campaign> {
-    // Get campaign
-    const campaign = await this.getCampaignById(id, userId);
-    if (!campaign) {
+  async updateCampaign(campaignId: string, userId: string, updates: Partial<Campaign>) {
+    // Check ownership
+    const existing = await this.getCampaignById(campaignId, userId);
+    if (!existing) {
       throw new NotFoundError('Campaign not found');
     }
 
-    // Update in platform
-    try {
-      const integration = await prisma.integration.findUnique({
-        where: { id: campaign.integrationId }
-      });
-
-      if (!integration) {
-        throw new NotFoundError('Integration not found');
+    // Update campaign
+    const campaign = await prisma.campaign.update({
+      where: { id: campaignId },
+      data: {
+        ...updates,
+        updatedAt: new Date()
+      },
+      include: {
+        integration: true
       }
+    });
 
-      const platformService = await this.platformManager.getPlatformService(integration);
-      await platformService.updateCampaign(campaign.externalId, updates);
+    // Sync with platform
+    await this.syncWithPlatform(campaign);
 
-      // Update in database
-      const updatedCampaign = await prisma.campaign.update({
-        where: { id },
-        data: {
-          ...updates,
-          updatedAt: new Date()
-        },
-        include: {
-          integration: true
-        }
-      });
+    // Clear cache
+    await this.cache.delete(`campaign:${campaignId}`);
+    await this.cache.deletePattern(`campaigns:${userId}:*`);
 
-      // Emit event
-      this.emit('campaign:updated', updatedCampaign);
-
-      // Invalidate cache
-      await CacheManager.delete(`campaign:${id}`);
-      await CacheManager.deletePattern(`campaigns:${userId}:*`);
-
-      return updatedCampaign;
-    } catch (error) {
-      logger.error('Failed to update campaign', error);
-      throw new ValidationError('Failed to update campaign');
-    }
+    return campaign;
   }
 
   /**
    * Update campaign status
    */
-  async updateCampaignStatus(
-    id: string,
-    userId: string,
-    status: CampaignStatus
-  ): Promise<Campaign> {
-    const campaign = await this.getCampaignById(id, userId);
-    if (!campaign) {
-      throw new NotFoundError('Campaign not found');
-    }
-
-    // Validate status transition
-    if (!this.isValidStatusTransition(campaign.status, status)) {
-      throw new ValidationError(`Cannot change status from ${campaign.status} to ${status}`);
-    }
-
-    // Update status in platform
-    try {
-      const integration = await prisma.integration.findUnique({
-        where: { id: campaign.integrationId }
-      });
-
-      if (!integration) {
-        throw new NotFoundError('Integration not found');
+  async updateCampaignStatus(campaignId: string, userId: string, status: CampaignStatus) {
+    const campaign = await this.updateCampaign(campaignId, userId, { status });
+    
+    // Update on platform
+    if (campaign.integration.status === 'ACTIVE') {
+      try {
+        await this.platformManager.updateCampaignStatus(
+          campaign.integration,
+          campaign.externalId,
+          status
+        );
+      } catch (error) {
+        logger.error('Failed to update campaign status on platform', { error, campaignId });
       }
-
-      const platformService = await this.platformManager.getPlatformService(integration);
-      await platformService.updateCampaignStatus(campaign.externalId, status);
-
-      // Update in database
-      const updatedCampaign = await prisma.campaign.update({
-        where: { id },
-        data: { 
-          status,
-          updatedAt: new Date()
-        },
-        include: {
-          integration: true
-        }
-      });
-
-      // Emit event
-      this.emit('campaign:statusChanged', {
-        campaign: updatedCampaign,
-        previousStatus: campaign.status,
-        newStatus: status
-      });
-
-      // Create alert for status change
-      await prisma.alert.create({
-        data: {
-          userId,
-          campaignId: id,
-          type: 'CAMPAIGN_ENDED',
-          severity: 'LOW',
-          title: `Campaign ${status === 'PAUSED' ? 'paused' : status === 'ACTIVE' ? 'resumed' : 'status changed'}`,
-          message: `Campaign "${campaign.name}" status changed from ${campaign.status} to ${status}`
-        }
-      });
-
-      return updatedCampaign;
-    } catch (error) {
-      logger.error('Failed to update campaign status', error);
-      throw new ValidationError('Failed to update campaign status');
     }
+
+    return campaign;
   }
 
   /**
-   * Delete campaign (soft delete)
+   * Delete campaign
    */
-  async deleteCampaign(id: string, userId: string): Promise<void> {
-    const campaign = await this.getCampaignById(id, userId);
+  async deleteCampaign(campaignId: string, userId: string) {
+    const campaign = await this.getCampaignById(campaignId, userId);
     if (!campaign) {
       throw new NotFoundError('Campaign not found');
     }
 
-    // Delete from platform
-    try {
-      const integration = await prisma.integration.findUnique({
-        where: { id: campaign.integrationId }
-      });
-
-      if (integration) {
-        const platformService = await this.platformManager.getPlatformService(integration);
-        await platformService.deleteCampaign(campaign.externalId);
-      }
-    } catch (error) {
-      logger.warn('Failed to delete campaign from platform', error);
-    }
-
-    // Soft delete in database
+    // Soft delete
     await prisma.campaign.update({
-      where: { id },
-      data: { 
+      where: { id: campaignId },
+      data: {
         deletedAt: new Date(),
         status: 'COMPLETED'
       }
     });
 
-    // Delete related data
-    await Promise.all([
-      prisma.metric.deleteMany({ where: { campaignId: id } }),
-      prisma.aiInsight.deleteMany({ where: { campaignId: id } }),
-      prisma.alert.deleteMany({ where: { campaignId: id } })
-    ]);
-
-    // Emit event
-    this.emit('campaign:deleted', campaign);
-
-    // Invalidate cache
-    await CacheManager.delete(`campaign:${id}`);
-    await CacheManager.deletePattern(`campaigns:${userId}:*`);
+    // Clear cache
+    await this.cache.delete(`campaign:${campaignId}`);
+    await this.cache.deletePattern(`campaigns:${userId}:*`);
   }
 
   /**
-   * Sync campaign data from platform
+   * Duplicate campaign
    */
-  async syncCampaign(id: string, userId: string): Promise<void> {
-    const campaign = await this.getCampaignById(id, userId);
+  async duplicateCampaign(campaignId: string, userId: string, newName?: string) {
+    const original = await this.getCampaignById(campaignId, userId);
+    if (!original) {
+      throw new NotFoundError('Campaign not found');
+    }
+
+    const { id, externalId, createdAt, updatedAt, ...campaignData } = original;
+
+    const duplicate = await prisma.campaign.create({
+      data: {
+        ...campaignData,
+        name: newName || `${original.name} (Copy)`,
+        status: 'DRAFT',
+        user: { connect: { id: userId } },
+        integration: { connect: { id: original.integrationId } }
+      }
+    });
+
+    return duplicate;
+  }
+
+  /**
+   * Bulk update campaign status
+   */
+  async bulkUpdateStatus(campaignIds: string[], userId: string, status: CampaignStatus) {
+    // Verify ownership
+    const campaigns = await prisma.campaign.findMany({
+      where: {
+        id: { in: campaignIds },
+        userId,
+        deletedAt: null
+      }
+    });
+
+    if (campaigns.length !== campaignIds.length) {
+      throw new ForbiddenError('One or more campaigns not found or access denied');
+    }
+
+    // Update campaigns
+    const result = await prisma.campaign.updateMany({
+      where: {
+        id: { in: campaignIds },
+        userId
+      },
+      data: {
+        status,
+        updatedAt: new Date()
+      }
+    });
+
+    // Clear cache
+    await this.cache.deletePattern(`campaigns:${userId}:*`);
+    for (const id of campaignIds) {
+      await this.cache.delete(`campaign:${id}`);
+    }
+
+    return {
+      updated: result.count,
+      campaignIds
+    };
+  }
+
+  /**
+   * Bulk delete campaigns
+   */
+  async bulkDelete(campaignIds: string[], userId: string) {
+    // Verify ownership
+    const campaigns = await prisma.campaign.findMany({
+      where: {
+        id: { in: campaignIds },
+        userId,
+        deletedAt: null
+      }
+    });
+
+    if (campaigns.length !== campaignIds.length) {
+      throw new ForbiddenError('One or more campaigns not found or access denied');
+    }
+
+    // Soft delete
+    const result = await prisma.campaign.updateMany({
+      where: {
+        id: { in: campaignIds },
+        userId
+      },
+      data: {
+        deletedAt: new Date(),
+        status: 'COMPLETED'
+      }
+    });
+
+    // Clear cache
+    await this.cache.deletePattern(`campaigns:${userId}:*`);
+    for (const id of campaignIds) {
+      await this.cache.delete(`campaign:${id}`);
+    }
+
+    return {
+      deleted: result.count,
+      campaignIds
+    };
+  }
+
+  /**
+   * Get campaign performance
+   */
+  async getCampaignPerformance(campaignId: string, userId: string, period: string): Promise<CampaignPerformance> {
+    const campaign = await this.getCampaignById(campaignId, userId);
     if (!campaign) {
       throw new NotFoundError('Campaign not found');
     }
 
-    try {
-      const integration = await prisma.integration.findUnique({
-        where: { id: campaign.integrationId }
-      });
-
-      if (!integration) {
-        throw new NotFoundError('Integration not found');
-      }
-
-      const platformService = await this.platformManager.getPlatformService(integration);
-      
-      // Get updated campaign data
-      const platformCampaign = await platformService.getCampaignById(campaign.externalId);
-      
-      // Update campaign
-      await prisma.campaign.update({
-        where: { id },
-        data: {
-          name: platformCampaign.name,
-          status: this.mapPlatformStatus(platformCampaign.status),
-          budget: platformCampaign.budget,
-          lastSyncAt: new Date()
-        }
-      });
-
-      // Sync metrics
-      const endDate = new Date();
-      const startDate = campaign.lastSyncAt || campaign.createdAt;
-      
-      const metrics = await platformService.getCampaignMetrics(
-        [campaign.externalId],
-        startDate,
-        endDate
-      );
-
-      // Save metrics
-      for (const metric of metrics) {
-        await prisma.metric.upsert({
-          where: {
-            campaignId_date_granularity: {
-              campaignId: id,
-              date: metric.date,
-              granularity: 'DAILY'
-            }
-          },
-          update: {
-            impressions: metric.impressions,
-            clicks: metric.clicks,
-            spend: metric.spend,
-            conversions: metric.conversions,
-            ctr: metric.ctr,
-            cpc: metric.cpc,
-            cpm: metric.cpm,
-            cpa: metric.cpa,
-            roas: metric.roas,
-            conversionRate: metric.conversionRate,
-            platformMetrics: metric.platformMetrics
-          },
-          create: {
-            campaignId: id,
-            date: metric.date,
-            granularity: 'DAILY',
-            impressions: metric.impressions,
-            clicks: metric.clicks,
-            spend: metric.spend,
-            conversions: metric.conversions,
-            ctr: metric.ctr,
-            cpc: metric.cpc,
-            cpm: metric.cpm,
-            cpa: metric.cpa,
-            roas: metric.roas,
-            conversionRate: metric.conversionRate,
-            platformMetrics: metric.platformMetrics
-          }
-        });
-      }
-
-      // Emit event
-      this.emit('campaign:synced', campaign);
-
-      logger.info('Campaign sync completed', { campaignId: id });
-    } catch (error) {
-      logger.error('Campaign sync failed', { campaignId: id, error });
-      throw error;
+    // Calculate date range
+    const endDate = new Date();
+    const startDate = new Date();
+    
+    switch (period) {
+      case '24h':
+        startDate.setHours(startDate.getHours() - 24);
+        break;
+      case '7d':
+        startDate.setDate(startDate.getDate() - 7);
+        break;
+      case '30d':
+        startDate.setDate(startDate.getDate() - 30);
+        break;
+      default:
+        startDate.setDate(startDate.getDate() - 7);
     }
+
+    // Get metrics
+    const metrics = await prisma.metric.findMany({
+      where: {
+        campaignId,
+        date: {
+          gte: startDate,
+          lte: endDate
+        }
+      }
+    });
+
+    // Calculate totals
+    const totals = metrics.reduce((acc, metric) => ({
+      impressions: acc.impressions + metric.impressions,
+      clicks: acc.clicks + metric.clicks,
+      conversions: acc.conversions + metric.conversions,
+      spend: acc.spend + metric.spend.toNumber()
+    }), {
+      impressions: 0,
+      clicks: 0,
+      conversions: 0,
+      spend: 0
+    });
+
+    // Calculate rates
+    const performance: CampaignPerformance = {
+      ...totals,
+      ctr: totals.impressions > 0 ? (totals.clicks / totals.impressions) * 100 : 0,
+      cvr: totals.clicks > 0 ? (totals.conversions / totals.clicks) * 100 : 0,
+      cpc: totals.clicks > 0 ? totals.spend / totals.clicks : 0,
+      cpa: totals.conversions > 0 ? totals.spend / totals.conversions : 0,
+      roas: totals.spend > 0 ? (totals.conversions * 100) / totals.spend : 0, // Assuming $100 per conversion
+      trend: {
+        spend: 0,
+        conversions: 0,
+        roas: 0
+      }
+    };
+
+    // Calculate trends (compare with previous period)
+    // This is simplified - in production, you'd want more sophisticated trend analysis
+    
+    return performance;
   }
 
   /**
-   * Check if status transition is valid
+   * Sync campaign with platform
    */
-  private isValidStatusTransition(from: CampaignStatus, to: CampaignStatus): boolean {
-    const validTransitions: Record<CampaignStatus, CampaignStatus[]> = {
-      DRAFT: ['ACTIVE', 'SCHEDULED'],
-      SCHEDULED: ['ACTIVE', 'PAUSED', 'DRAFT'],
-      ACTIVE: ['PAUSED', 'COMPLETED'],
-      PAUSED: ['ACTIVE', 'COMPLETED'],
-      COMPLETED: []
-    };
+  private async syncWithPlatform(campaign: Campaign & { integration: any }) {
+    try {
+      if (campaign.integration.status !== 'ACTIVE') {
+        return;
+      }
 
-    return validTransitions[from]?.includes(to) || false;
-  }
-
-  /**
-   * Map platform status to internal status
-   */
-  private mapPlatformStatus(platformStatus: string): CampaignStatus {
-    const statusMap: Record<string, CampaignStatus> = {
-      'ENABLED': 'ACTIVE',
-      'PAUSED': 'PAUSED',
-      'REMOVED': 'COMPLETED',
-      'PENDING': 'SCHEDULED',
-      'DRAFT': 'DRAFT'
-    };
-
-    return statusMap[platformStatus.toUpperCase()] || 'DRAFT';
+      await this.platformManager.syncCampaign(campaign.integration, campaign.id);
+    } catch (error) {
+      logger.error('Failed to sync campaign with platform', { error, campaignId: campaign.id });
+      // Don't throw - this is a background operation
+    }
   }
 }
